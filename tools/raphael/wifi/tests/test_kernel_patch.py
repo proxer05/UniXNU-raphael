@@ -39,14 +39,12 @@ class KernelPatchTests(unittest.TestCase):
 
     def test_build_registration_complete(self):
         parts = sections()
-        bsd = added(parts['bsd/conf/files'])
-        for name in BSD_FILES:
-            if name == 'sweet_rpmh.c' and 'bsd/dev/sweet_rpmh.c' not in sections():
-                continue  # only in newer patches
         iokit = added(parts['iokit/conf/files.arm64'])
-        for name in IOKIT_FILES:
-            self.assertTrue(any(line.split() == ['iokit/Kernel/arm/' + name, 'optional', 'iokitcpp']
-                                for line in iokit), name)
+        # The baseline already registers SweetNetwork.cpp (patch 0110) and headers are
+        # found via includes; this patch must add only RedwoodWLAN.cpp.
+        self.assertTrue(any(line.split() == ['iokit/Kernel/arm/RedwoodWLAN.cpp', 'optional', 'iokitcpp']
+                            for line in iokit))
+        self.assertNotIn('+iokit/Kernel/arm/SweetNetwork.cpp', parts['iokit/conf/files.arm64'])
 
     def test_build_lines_have_type_on_same_line(self):
         for path in ('bsd/conf/files', 'iokit/conf/files.arm64'):
