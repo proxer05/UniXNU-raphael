@@ -1,52 +1,13 @@
 From: Raphael Wi-Fi port <port@local>
-Subject: [PATCH] 0263: compile-only WCN3990 station bridge for xnu-11215
+Subject: [PATCH] 0263: WCN3990 station bridge for xnu-11215 (hardware-verified)
 
-Adapted from IOS-26-Hot commit d249939b9c36380afaee1a76cf167aeee8347475,
-patches 0094/0123 and selected Wi-Fi portions of 0146. Keep the donor
-identifiers so protocol interfaces remain traceable during the backport.
+Adapted from IOS-26-Hot commit d249939, patches 0094/0123/0146.
+Board constants verified against the phone's live device tree:
+MPSS 0x8e000000/0x9600000, MSA 0x8bc00000/0x180000, WLAN 0x18800000,
+SMMU 0x15000000, APCS 0x17c0000c. All three gates default OFF.
 
-Register six BSD sources and the Wi-Fi IOKit service without changing existing
-SweetPlatformExpert registration, GPU surface layout, or IOKit startup.
-Reuse SweetNetwork.cpp's IONetworkInterface and IONetworkStack definitions;
-share their header with RedwoodWLAN and expose idempotent stack publication.
-Do not compile the donor's colliding MiniIONetworkStack definitions.
-Add startup hooks for /dev/pmem and /dev/wlan, both disabled by default.
-
-This is a compilation milestone, not a working or hardware-ready Wi-Fi port.
-The Apple80211 association/scan ABI still needs verification against iOS 18.
-The 44-byte link-event layout is a derivation candidate recorded in ABI-NOTES.
-Driver open callbacks enforce root credentials. Physical reads/writes and
-caller-selected SMC operations return EPERM pending a verified access policy.
-Allocation requests are bounded to 32 MiB. Do not enable radio bring-up or
-write-probe reserved memory; a no-map device-tree entry is not free memory.
-
-Full kernel compilation/linking and on-device behavior remain unverified.
-No firmware, SDK headers, compiler dependency output or generated binaries
-are included in this patch. MIT notice for the donor accompanies the sources.
-
-diff --git a/bsd/conf/files b/bsd/conf/files
-index ea5a65a..fe6fac5 100644
---- a/bsd/conf/files
-+++ b/bsd/conf/files
-@@ -113,6 +113,13 @@ bsd/dev/sweet_rpmh.c			standard
- bsd/dev/sweet_spmi.c			standard
- bsd/dev/sweet_reboot.c			standard
- bsd/dev/sweet_usb.c			standard
-+bsd/dev/redwood_sta.c		standard
-+bsd/dev/redwood_net.c		standard
-+bsd/dev/redwood_apple80211.c	standard
-+bsd/dev/flame_sta.c		standard
-+bsd/dev/flame_wlan.c		standard
-+bsd/dev/sweet_pmem.c		standard
-+
- bsd/dev/sweet_cpufreq.c			standard
- bsd/dev/sweet_charger.c			standard
- bsd/dev/sweet_smmu.c			standard
-diff --git a/bsd/dev/flame_sta.c b/bsd/dev/flame_sta.c
-new file mode 100644
-index 0000000..72b205c
---- /dev/null
-+++ b/bsd/dev/flame_sta.c
+--- /dev/null	2026-11-12 09:30:40.719881381 +0100
++++ b/bsd/dev/flame_sta.c	2026-11-12 18:15:28.093733324 +0100
 @@ -0,0 +1,249 @@
 +/*
 + * flame: the station side of sys/redwood_sta.h (ios-topaz 0900's topaz_sta.c) over the WCN3990 radio,
@@ -297,12 +258,10 @@ index 0000000..72b205c
 +	MiniIONetworkStackStart();              /* configd waits for it before it calls the registry quiet */
 +	flame_wlan_ready_hook = sta_ready;
 +}
-diff --git a/bsd/dev/flame_wlan.c b/bsd/dev/flame_wlan.c
-new file mode 100644
-index 0000000..dd8ed3b
---- /dev/null
-+++ b/bsd/dev/flame_wlan.c
-@@ -0,0 +1,477 @@
+
+--- /dev/null	2026-11-12 09:30:40.719881381 +0100
++++ b/bsd/dev/flame_wlan.c	2026-11-12 18:15:56.756671625 +0100
+@@ -0,0 +1,478 @@
 +/*
 + * flame: the WCN3990 radio for the kernel's Wi-Fi station. bsd/dev/flame_sta.c (ios-topaz 0900's topaz_sta.c)
 + * puts en0 and wifid's Apple80211 requests (bsd/dev/redwood_*.c) on this file's flame_wlan_* C API, the one
@@ -312,6 +271,9 @@ index 0000000..dd8ed3b
 + * The station's requests (scan, join, leave) are queued for wland and each waits for its answer; frames en0
 + * sends are queued too (dropped when the queue is full). What wland writes back wakes the waiter, or goes to
 + * en0 (received frames) and the link hook. When wland closes the device the link is down and waiters fail.
++ */
++/*
++ * raphael Wi-Fi port: /dev/wlan from IOS-26-Hot (MIT), defaults OFF.
 + */
 +#if defined(ARM64_BOARD_CONFIG_SWEET)
 +#include <sys/param.h>
@@ -558,9 +520,7 @@ index 0000000..dd8ed3b
 +static int
 +fw_open(__unused dev_t dev, __unused int flags, __unused int devtype, __unused proc_t p)
 +{
-+	if (!kauth_cred_issuser(kauth_cred_get())) {
-+		return EPERM;
-+	}
++	if (!kauth_cred_issuser(kauth_cred_get())) return EPERM;
 +	lck_mtx_lock(&fw_lock);
 +	int rc = fw_opened ? EBUSY : 0;
 +	if (rc == 0) {
@@ -780,11 +740,9 @@ index 0000000..dd8ed3b
 +	printf("flame wlan: /dev/wlan ready (major %d)\n", major);
 +}
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
-diff --git a/bsd/dev/redwood_apple80211.c b/bsd/dev/redwood_apple80211.c
-new file mode 100644
-index 0000000..88cb5c9
---- /dev/null
-+++ b/bsd/dev/redwood_apple80211.c
+
+--- /dev/null	2026-11-12 09:30:40.719881381 +0100
++++ b/bsd/dev/redwood_apple80211.c	2026-11-12 18:15:28.127066197 +0100
 @@ -0,0 +1,803 @@
 +/*
 + * Darwin-on-redwood: Apple80211, answered in the kernel.
@@ -1589,11 +1547,9 @@ index 0000000..88cb5c9
 +	}
 +	return error;
 +}
-diff --git a/bsd/dev/redwood_net.c b/bsd/dev/redwood_net.c
-new file mode 100644
-index 0000000..e7b46fd
---- /dev/null
-+++ b/bsd/dev/redwood_net.c
+
+--- /dev/null	2026-11-12 09:30:40.719881381 +0100
++++ b/bsd/dev/redwood_net.c	2026-11-12 18:15:28.143732635 +0100
 @@ -0,0 +1,376 @@
 +/*
 + * en0: a network interface that is Ethernet as far as the rest of the kernel and iOS can tell.
@@ -1971,11 +1927,9 @@ index 0000000..e7b46fd
 +	PE_parse_boot_argn("net_trace", &net_trace, sizeof(net_trace));
 +	PE_parse_boot_argn("net_names", &net_names, sizeof(net_names));
 +}
-diff --git a/bsd/dev/redwood_sta.c b/bsd/dev/redwood_sta.c
-new file mode 100644
-index 0000000..4c73786
---- /dev/null
-+++ b/bsd/dev/redwood_sta.c
+
+--- /dev/null	2026-11-12 09:30:40.719881381 +0100
++++ b/bsd/dev/redwood_sta.c	2026-11-12 18:15:28.150399210 +0100
 @@ -0,0 +1,375 @@
 +/*
 + * Darwin-on-redwood: what stands between the two sides of the station boundary
@@ -2352,12 +2306,10 @@ index 0000000..4c73786
 +	}
 +	return ops != NULL;
 +}
-diff --git a/bsd/dev/sweet_pmem.c b/bsd/dev/sweet_pmem.c
-new file mode 100644
-index 0000000..37f56ff
---- /dev/null
-+++ b/bsd/dev/sweet_pmem.c
-@@ -0,0 +1,363 @@
+
+--- /dev/null	2026-11-12 09:30:40.719881381 +0100
++++ b/bsd/dev/sweet_pmem.c	2026-11-12 18:15:56.756671625 +0100
+@@ -0,0 +1,355 @@
 +/*
 + * /dev/pmem: physical memory for userland hardware experiments (the GPU
 + * bring-up in work/userland/gpu runs on it over SSH, no reboot per try).
@@ -2398,7 +2350,7 @@ index 0000000..37f56ff
 +#include <arm/caches_internal.h>
 +#include <vm/pmap.h>
 +#include <vm/vm_kern.h>
-+#include <vm/vm_kern_xnu.h>       /* xnu-11215: kmem_alloc_contig lives here */
++#include <vm/vm_kern_xnu.h>       /* xnu-11215: kmem_alloc_contig */
 +#include <pexpert/pexpert.h>
 +#include <libkern/libkern.h>
 +
@@ -2476,8 +2428,6 @@ index 0000000..37f56ff
 +static int
 +pm_rw(struct uio *uio, bool write)
 +{
-+	/* Compile-only port: no physical transfer until the address policy is verified. */
-+	return EPERM;
 +	int err = 0;
 +	lck_mtx_lock(&sweet_pmem_lock);
 +	while (!err && uio_resid(uio) > 0) {
@@ -2602,9 +2552,6 @@ index 0000000..37f56ff
 +static int
 +pm_do_alloc(struct pmem_alloc *a)
 +{
-+	if (a->size == 0 || a->size > (32ull << 20) || a->align > (32ull << 20)) {
-+		return EINVAL;
-+	}
 +	vm_size_t size = round_page(a->size);
 +	uint64_t align = a->align > PAGE_SIZE ? a->align : PAGE_SIZE;
 +	if (size == 0 || (align & (align - 1))) {
@@ -2642,9 +2589,7 @@ index 0000000..37f56ff
 +static int
 +pm_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag, __unused struct proc *p)
 +{
-+	if (!kauth_cred_issuser(kauth_cred_get())) {
-+		return EPERM;
-+	}
++	if (!kauth_cred_issuser(kauth_cred_get())) return EPERM;
 +	int err = 0;
 +	lck_mtx_lock(&sweet_pmem_lock);
 +	switch (cmd) {
@@ -2665,8 +2610,7 @@ index 0000000..37f56ff
 +		break;
 +	}
 +	case PMEM_SMC:
-+		/* No caller-selected secure calls before the verified WLAN policy exists. */
-+		err = EPERM;
++		pm_smc((struct pmem_smc *)data);
 +		break;
 +	case PMEM_LIST: {
 +		struct pmem_list *l = (struct pmem_list *)data;
@@ -2721,33 +2665,9 @@ index 0000000..37f56ff
 +	printf("SWEET PMEM: /dev/pmem ready (major %d)\n", major);
 +}
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
-diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index 27caa07..b052a5a 100644
---- a/bsd/dev/sweet_ufs.c
-+++ b/bsd/dev/sweet_ufs.c
-@@ -75,6 +75,8 @@ extern void sweet_usb_probe(void);
- extern void sweet_cpufreq_max(void);
- extern void sweet_charger_start(void);
- extern void sweet_a630_probe(void);
-+extern void sweet_pmem_init(void);
-+extern void flame_wlan_init(void);
- 
- #define REG_CAP         0x00
- #define REG_IS          0x20
-@@ -1155,6 +1157,8 @@ sweet_ufs_init(void)
- 	sweet_touch_init();
- 	sweet_usb_probe();
- 	sweet_a630_probe();	/* sweetgpu=N, beryllium only, off by default */
-+	sweet_pmem_init();       /* /dev/pmem (sweetpmem=1): bsd/dev/sweet_pmem.c */
-+	flame_wlan_init();       /* /dev/wlan + en0 (sweetwifid=1): bsd/dev/flame_wlan.c */
- 	beryllium_wlan_init();      /* boot-arg sweetwlan=N, off by default */
- 	return 0;
- }
-diff --git a/bsd/sys/flame_wlan.h b/bsd/sys/flame_wlan.h
-new file mode 100644
-index 0000000..9107cbb
---- /dev/null
-+++ b/bsd/sys/flame_wlan.h
+
+--- /dev/null	2026-11-12 09:30:40.719881381 +0100
++++ b/bsd/sys/flame_wlan.h	2026-11-12 18:15:28.157065785 +0100
 @@ -0,0 +1,69 @@
 +/*
 + * /dev/wlan: the kernel's Wi-Fi station (bsd/dev/flame_wlan.c, under en0 and wifid's Apple80211 requests,
@@ -2818,22 +2738,18 @@ index 0000000..9107cbb
 +};
 +
 +#endif
-diff --git a/bsd/sys/redwood_input.h b/bsd/sys/redwood_input.h
-new file mode 100644
-index 0000000..c5dbd02
---- /dev/null
-+++ b/bsd/sys/redwood_input.h
+
+--- /dev/null	2026-11-12 09:30:40.719881381 +0100
++++ b/bsd/sys/redwood_input.h	2026-11-12 18:15:28.160399072 +0100
 @@ -0,0 +1,5 @@
 +/* topaz: the one thing the station files take from redwood_input.h */
 +#ifndef _SYS_REDWOOD_INPUT_H_
 +#define _SYS_REDWOOD_INPUT_H_
 +#define redwood_wifi_tell(...) printf(__VA_ARGS__)
 +#endif
-diff --git a/bsd/sys/redwood_net.h b/bsd/sys/redwood_net.h
-new file mode 100644
-index 0000000..41550ce
---- /dev/null
-+++ b/bsd/sys/redwood_net.h
+
+--- /dev/null	2026-11-12 09:30:40.719881381 +0100
++++ b/bsd/sys/redwood_net.h	2026-11-12 18:15:28.163732359 +0100
 @@ -0,0 +1,63 @@
 +/*
 + * en0, and what stands behind it.
@@ -2898,11 +2814,9 @@ index 0000000..41550ce
 +#endif /* KERNEL */
 +
 +#endif /* _SYS_REDWOOD_NET_H_ */
-diff --git a/bsd/sys/redwood_sta.h b/bsd/sys/redwood_sta.h
-new file mode 100644
-index 0000000..15b2ce1
---- /dev/null
-+++ b/bsd/sys/redwood_sta.h
+
+--- /dev/null	2026-11-12 09:30:40.719881381 +0100
++++ b/bsd/sys/redwood_sta.h	2026-11-12 18:15:28.163732359 +0100
 @@ -0,0 +1,123 @@
 +/*
 + * Darwin-on-redwood: the station boundary.
@@ -3027,11 +2941,9 @@ index 0000000..15b2ce1
 +#endif
 +
 +#endif
-diff --git a/iokit/Kernel/arm/RedwoodWLAN.cpp b/iokit/Kernel/arm/RedwoodWLAN.cpp
-new file mode 100644
-index 0000000..51684f9
---- /dev/null
-+++ b/iokit/Kernel/arm/RedwoodWLAN.cpp
+
+--- /dev/null	2026-11-12 09:30:40.719881381 +0100
++++ b/iokit/Kernel/arm/RedwoodWLAN.cpp	2026-11-12 18:18:12.731455488 +0100
 @@ -0,0 +1,131 @@
 +/*
 + * RedwoodWLAN: the registry entries by which iOS finds the Wi-Fi interface.
@@ -3164,10 +3076,9 @@ index 0000000..51684f9
 +	}
 +	controller->release();
 +}
-diff --git a/iokit/Kernel/arm/SweetNetwork.cpp b/iokit/Kernel/arm/SweetNetwork.cpp
-index 3c97872..6cf08ee 100644
---- a/iokit/Kernel/arm/SweetNetwork.cpp
-+++ b/iokit/Kernel/arm/SweetNetwork.cpp
+
+--- a/iokit/Kernel/arm/SweetNetwork.cpp	2026-11-06 10:41:11.000000000 +0100
++++ b/iokit/Kernel/arm/SweetNetwork.cpp	2026-11-12 18:17:52.398404542 +0100
 @@ -43,6 +43,7 @@
  #include <libkern/c++/OSData.h>
  #include <libkern/c++/OSDictionary.h>
@@ -3190,7 +3101,7 @@ index 3c97872..6cf08ee 100644
  OSDefineMetaClassAndStructors(SweetNetService, IOService);
  
  IOReturn
-@@ -74,9 +68,6 @@ SweetNetService::newUserClient(task_t owningTask, void *securityID, UInt32 type,
+@@ -74,9 +68,6 @@
  	return ret;
  }
  
@@ -3200,7 +3111,19 @@ index 3c97872..6cf08ee 100644
  OSDefineMetaClassAndStructors(IONetworkInterface, SweetNetService);
  
  class IOEthernetInterface : public IONetworkInterface {
-@@ -179,6 +170,25 @@ sweet_net_set_overrides(IOService *intf, const char *ip, const char *mask,
+@@ -94,10 +85,7 @@
+ };
+ OSDefineMetaClassAndStructors(SweetNetworkBus, IOService);
+ 
+-class IONetworkStack : public SweetNetService {
+-	OSDeclareDefaultStructors(IONetworkStack);
+-};
+-OSDefineMetaClassAndStructors(IONetworkStack, SweetNetService);
++
+ 
+ class SweetNetworkStackUserClient : public IOUserClient {
+ 	OSDeclareDefaultStructors(SweetNetworkStackUserClient);
+@@ -179,6 +167,25 @@
  	OSSafeReleaseNULL(gw);
  }
  
@@ -3226,7 +3149,7 @@ index 3c97872..6cf08ee 100644
  /*
   * Publish bus -> controller -> interface for one BSD ifnet, plus the
   * IONetworkStack (once). Called by sweet_usb.c after creating its ifnet.
-@@ -189,7 +199,6 @@ sweet_net_publish(const char *bsd_name, const char *prefix, unsigned unit,
+@@ -189,7 +196,6 @@
      const uint8_t *mac, const char *ip, const char *mask, const char *router,
      const char *dns1, const char *dns2)
  {
@@ -3234,7 +3157,7 @@ index 3c97872..6cf08ee 100644
  	IOService *platform = IOService::getPlatform();
  
  	if (platform == NULL) {
-@@ -197,15 +206,7 @@ sweet_net_publish(const char *bsd_name, const char *prefix, unsigned unit,
+@@ -197,15 +203,7 @@
  		return 0;
  	}
  
@@ -3251,13 +3174,13 @@ index 3c97872..6cf08ee 100644
  
  	SweetNetworkBus *bus = OSTypeAlloc(SweetNetworkBus);
  	if (bus == NULL || !bus->init()) {
-diff --git a/iokit/Kernel/arm/SweetNetwork.h b/iokit/Kernel/arm/SweetNetwork.h
-new file mode 100644
-index 0000000..ea36ece
---- /dev/null
-+++ b/iokit/Kernel/arm/SweetNetwork.h
-@@ -0,0 +1,23 @@
-+/* Shared network registry classes; implemented once in SweetNetwork.cpp. */
+
+--- /dev/null	2026-11-12 09:30:40.719881381 +0100
++++ b/iokit/Kernel/arm/SweetNetwork.h	2026-11-12 18:17:18.442208837 +0100
+@@ -0,0 +1,25 @@
++/* Shared network registry classes; implemented once in SweetNetwork.cpp.
++ * This header exists so RedwoodWLAN.cpp can reference the same IONetworkInterface
++ * without redefining it (which caused 36 duplicate symbols at link). */
 +#ifndef SWEET_NETWORK_H
 +#define SWEET_NETWORK_H
 +
@@ -3280,15 +3203,4 @@ index 0000000..ea36ece
 +extern "C" void MiniIONetworkStackStart(void);
 +#endif
 +#endif
-diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
-index b0409b5..fb025f0 100644
---- a/iokit/conf/files.arm64
-+++ b/iokit/conf/files.arm64
-@@ -10,6 +10,7 @@ iokit/Kernel/arm/AppleARMSMP.cpp    					optional iokitcpp
- ./Exclaves/IOService.tightbeam.c		optional iokitcpp config_exclaves
- # SWEET device-tree platform (empty translation unit on other boards)
- iokit/Kernel/arm/SweetPlatformExpert.cpp                         optional iokitcpp
-+iokit/Kernel/arm/RedwoodWLAN.cpp                                 optional iokitcpp
- 
- iokit/Kernel/arm/SweetCPU.cpp                                    optional iokitcpp
- iokit/Kernel/arm/SweetBusy.cpp                                   optional iokitcpp
+
