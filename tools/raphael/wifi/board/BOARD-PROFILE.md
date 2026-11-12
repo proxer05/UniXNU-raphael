@@ -44,15 +44,21 @@ Kernel-managed DRAM under iOS: the **high bank only** (ADT `dram-base 0x14000000
 +0xc0000000`); the whole low bank is outside the kernel's map, so pool/MSA/MPSS
 regions live there via `/dev/pmem` device mappings, as the donor does.
 
-## DMA pool decision (recommended, still to be re-verified once on the UEFI map)
+## DMA pool: unresolved; do not write-probe reserved memory
 
-Take the 16 MiB pool from **inside `removed_regions`**, e.g. base **0x8a000000**
-(0x8a000000..0x8b000000, comfortably inside 0x86200000..0x8b700000 with 0x600000
-margin at each end). Rationale: Android already treats all of it as no-map firmware
-land (85 MiB "removed"), so ABL/UEFI/peripherals have no live allocations there;
-unlike the donor's 0xE0000000 (plain Android RAM, whose UEFI ownership under Aloha
-is unverified). First `sweetpmem=1` boot re-verifies with read/write probes before
-anything points the radio at it.
+`0x8a000000..0x8b000000` lies numerically within the live `removed_regions`
+range, but that does **not** establish that it is unused, accessible to WLAN DMA,
+or available to this kernel. Reserved/no-map memory can hold secure firmware or
+peripheral allocations. Being outside the kernel-managed high bank is not proof
+of ownership either. No read/write probe has been run, and none is authorized by
+this profile.
+
+The earlier recommendation to use that range as a pool was unsupported. The
+userland source still contains this unverified candidate and must not be deployed.
+Before enabling it, establish an explicitly reserved DMA allocation from the boot
+firmware's complete memory map, account for firmware/secure ownership, and validate
+the WLAN SMMU/cache/address-width requirements. The compile-only pmem patch rejects
+physical transfers and SMC calls until a narrowly defined policy exists.
 
 ## Remaining Phase C inputs
 

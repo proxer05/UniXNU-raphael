@@ -6,8 +6,8 @@
 | Licence | MIT (donor `LICENSE`, (c) 2026 dipa-studio); upstream headers kept in every file |
 | Donor context | userspace half of the donor Wi-Fi stack: `wland` drives WCN3990 over `/dev/pmem` (QRTR/SMEM/SMP2P, WLFW/QMI, rmtfs, pdmapper) and serves the kernel's station through `/dev/wlan` (`flamewlan.h`) |
 
-Modifications to `src/` (board constants only, 2026-11-12; every value verified against
-the phone's live device tree — see board/BOARD-PROFILE.md):
+Modifications to `src/` (board constants only, 2026-11-12; MPSS/MSA ranges
+observed in the live device tree; the DMA pool candidate remains unverified):
 
 - `wland.c`: `MPSS_PA` 0x8dc00000 → **0x8e000000**, `MPSS_SIZE` 0x0a000000 → **0x09600000**
 - `radio.c`: `POOL_PA` 0xE0000000 → **0x8a000000** (inside removed_regions; probe on first boot)

@@ -1,28 +1,50 @@
 # Raphael Wi-Fi port (from IOS-26-Hot)
 
-Port of the WCN3990 Wi-Fi stack of [IOS-26-Hot](https://github.com/nithinyadavamaraboina-online/IOS-26-Hot)
-(MIT) to this repository's xnu-11215 / iOS 18.7.8 Raphael setup. Donor sources vendored
-verbatim in `src/` from the pinned commit `d249939b9c36380afaee1a76cf167aeee8347475`
-(`phone/wifi/*`); their upstream headers carry the copyright and the licence is MIT
-(see `PROVENANCE.md`). Everything here is **off by default** until the port is complete
-and tested on hardware; nothing in this directory is installed on the phone yet.
+Experimental backport of the WCN3990 userspace driver and XNU station bridge to
+xnu-11215 / iOS 18.7.8. Donor source is pinned to
+`d249939b9c36380afaee1a76cf167aeee8347475`; its MIT notice is in `LICENSE.donor`.
+See `PROVENANCE.md` for local changes and upstream credits.
 
-Status per phase (see the approved port plan):
+**Not a working or hardware-ready Wi-Fi port.** Do not deploy the experimental
+`wland` build or enable the radio. Working GPU/jailbreak images are unchanged.
 
-- [x] A1 donor vendored (pinned commit, licence checked)
-- [ ] A2 host tests green (`tests/run.sh`)
-- [ ] B  kernel patch `xnu/patches-11215/0263-raphael-wifi-bridge.patch` (pmem + /dev/wlan,
-      iOS 18 Apple80211 ABI derived from the local root's IO80211.framework — never copied
-      from the donor's iOS 16/26 layouts)
-- [ ] C  Raphael board profile with **verified** addresses (WLAN/CE/SMMU/MPSS/pool clear of
-      the low-bank reserved-memory carve-outs) + firmware/NV from the phone's own partitions
-- [ ] D  `wland` built for iOS 18, staged over USB SSH, bring-up ladder one step at a time
+## Current checks and blockers
 
-Known donor board assumptions that are NOT valid for Raphael until verified in phase C:
-`MPSS_PA 0x8dc00000` (Realme), DMA pool `0xE0000000`, `SMMU_PA 0x15000000`, `WLAN_PA 0x18800000`.
-The kernel's managed DRAM on Raphael is the high bank `0x140000000+0xc0000000`; the low bank
-holds firmware pil regions and other carve-outs that must be enumerated first.
+- Thirteen userspace protocol translation units compile in the Linux test harness.
+  Its tests check the message structures and host crypto shims, not radio behavior.
+- Patch `0263-raphael-wifi-bridge.patch` now lists all six BSD and two IOKit sources.
+  Both Makefiles generate using XNU's actual config parser. Full compilation and
+  linking require the macOS CI result; earlier syntax checks were not sufficient.
+- `/dev/pmem` and `/dev/wlan` default off. Driver opens enforce root credentials.
+  Physical-memory transfers and SMC calls return `EPERM` pending a verified policy.
+- iOS 18 association/scan buffer ABI derivation is incomplete. `ABI-NOTES.md` is
+  exploratory evidence, not permission to choose unverified struct layouts.
+- The live tree confirms MPSS `0x8e000000/0x9600000` and WLAN MSA
+  `0x8bc00000/0x180000`, but does not prove a safe DMA pool. The candidate
+  `0x8a000000` in the userspace source remains unverified; never write-probe it.
+- A signed userspace binary built against hand-written Darwin headers is not yet
+  runtime-valid: struct, constants, symbol versions and imports need an ABI audit.
+- Firmware was extracted from the user's stock V10.3.1.0 package. Board calibration
+  selection, firmware compatibility and nonpersistent NV behavior still need checks.
 
-Host tests (`tests/`) compile the protocol sources on Linux with OpenSSL-backed shims for
-CommonCrypto and a stub `sysctl`; they cover the `/dev/wlan` message ABI and the
-parse/bring-up code paths that do not touch devices.
+## Host checks
+
+```sh
+sh tools/raphael/wifi/tests/run.sh
+python3 -I tools/raphael/wifi/tests/test_kernel_patch.py
+```
+
+No test enables firmware or contacts the phone. Test builds use temporary output
+paths; the donated sources remain traceable to their original interfaces.
+
+## Validation order
+
+1. Source-only patch applies; configuration generation succeeds; macOS kernel CI
+   compiles and links the entire disabled bridge.
+2. Independently validate iOS 18 buffer layouts, userspace Darwin ABI and safe
+   memory/SCM interfaces; firmware and NV inputs remain private.
+3. Only then design separately authorized, staged on-device radio tests, with the
+   working GPU/read-write boot image retained as rollback.
+
+The presence of `/dev/wlan`, an `en0` object, a compiled binary or a green CI build
+alone is not proof of scanning, association, packet traffic or native Settings support.
