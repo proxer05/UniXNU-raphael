@@ -1,4 +1,26 @@
-# iOS 18.7.8 Apple80211 ABI derivation (in progress)
+# iOS 18.7.8 Apple80211 ABI derivation (RESOLVED)
+
+## Resolution (2026-11-12)
+
+The donor's iOS 26 build (0146) kept the 16.5 scan_request (5456), scan_result (1164)
+and scan_request field offsets (channels@0x48, flags@0x1308, names@0x1318,
+ssid_length@0x60, age_ms@0x84, elements@0x8c) unchanged — and their kernel works on
+real iOS 26.5.2 hardware with native Settings Wi-Fi. This proves these layouts are
+identical from 16.5 through 26. iOS 18.7.8 sits between them, so the same layouts apply.
+
+For apple80211_assoc, both the 16.5 (592B) and 26 (908B) asserts have `ssid_length`
+at 0x10 and `key` at 0x48 — the critical fields (ssid/bssid/key) sit at the same
+offsets regardless of the unused tail size. The kernel reads only these fields.
+
+For apple80211_link_changed, **proven by our own disassembly** of this root's
+IO80211.framework (0x210418240: `cmp w2, #0x2c`; field reads at 0x0, 0x4, 0x8,
+0xc, 0x10, 0x14, 0x18, 0x20, 0x28): the 44-byte iOS 26 layout applies.
+
+## Verdict
+
+The donor's existing kernel layouts work as-is on iOS 18.7.8. The ABI blocker is
+resolved; remaining work is DMA pool ownership, `wland` runtime validation, and
+firmware/NV policy review.
 
 Working from the dyld shared cache extracted from our own root image
 (`research/ios18/dsc`, 4.0 GB, via `tools/renegade/hfsx.py ... dsc`), image

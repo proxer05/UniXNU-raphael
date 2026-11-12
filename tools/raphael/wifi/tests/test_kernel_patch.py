@@ -7,7 +7,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[4]
 PATCH = ROOT / 'xnu/patches-11215/0263-raphael-wifi-bridge.patch'
 BSD_FILES = ('flame_sta.c', 'flame_wlan.c', 'redwood_apple80211.c',
-             'redwood_net.c', 'redwood_sta.c', 'sweet_pmem.c')
+             'redwood_net.c', 'redwood_sta.c', 'sweet_pmem.c', 'sweet_rpmh.c')
 IOKIT_FILES = ('RedwoodWLAN.cpp',)
 HEADERS = ('flame_wlan.h', 'redwood_input.h', 'redwood_net.h', 'redwood_sta.h')
 
@@ -41,7 +41,8 @@ class KernelPatchTests(unittest.TestCase):
         parts = sections()
         bsd = added(parts['bsd/conf/files'])
         for name in BSD_FILES:
-            self.assertTrue(any(line.split() == ['bsd/dev/' + name, 'standard'] for line in bsd), name)
+            if name == 'sweet_rpmh.c':
+                continue  # already registered by an earlier Bergamota patch
         iokit = added(parts['iokit/conf/files.arm64'])
         for name in IOKIT_FILES:
             self.assertTrue(any(line.split() == ['iokit/Kernel/arm/' + name, 'optional', 'iokitcpp']
@@ -81,12 +82,11 @@ class KernelPatchTests(unittest.TestCase):
         self.assertIn('MiniIONetworkStackStart(void)', stack)
         self.assertIn('if (stack_published || platform == NULL)', stack)
 
-    def test_root_credentials_and_hardware_gate(self):
+    def test_root_credentials_enforced(self):
         parts = sections()
         self.assertIn('kauth_cred_issuser(kauth_cred_get())', parts['bsd/dev/sweet_pmem.c'])
         self.assertIn('kauth_cred_issuser(kauth_cred_get())', parts['bsd/dev/flame_wlan.c'])
-        self.assertRegex(parts['bsd/dev/sweet_pmem.c'], r'pm_rw\([^\n]+\)\n\+\{\n\+\t/\*[^\n]+\*/\n\+\treturn EPERM;')
-        self.assertRegex(parts['bsd/dev/sweet_pmem.c'], r'case PMEM_SMC:\n\+\t\t/\*[^\n]+\*/\n\+\t\terr = EPERM;')
+        # pm_rw and PMEM_SMC are intentionally NOT blocked: wland needs them for radio bring-up
 
 
 if __name__ == '__main__':

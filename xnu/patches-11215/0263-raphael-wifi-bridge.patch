@@ -15,10 +15,9 @@ Features:
 - sweet_rpmh.c: ARC resource support and generic sweet_rpmh_write()
 
 diff --git a/bsd/conf/files b/bsd/conf/files
-index ea5a65a..fe6fac5 100644
---- a/bsd/conf/files
-+++ b/bsd/conf/files
-@@ -113,6 +113,13 @@ bsd/dev/sweet_rpmh.c			standard
+--- a/bsd/conf/files	2026-11-06 10:41:11.000000000 +0100
++++ b/bsd/conf/files	2026-11-12 19:47:42.851857374 +0100
+@@ -113,6 +113,13 @@
  bsd/dev/sweet_spmi.c			standard
  bsd/dev/sweet_reboot.c			standard
  bsd/dev/sweet_usb.c			standard
@@ -32,11 +31,10 @@ index ea5a65a..fe6fac5 100644
  bsd/dev/sweet_cpufreq.c			standard
  bsd/dev/sweet_charger.c			standard
  bsd/dev/sweet_smmu.c			standard
+
 diff --git a/bsd/dev/flame_sta.c b/bsd/dev/flame_sta.c
-new file mode 100644
-index 0000000..72b205c
---- /dev/null
-+++ b/bsd/dev/flame_sta.c
+--- a/bsd/dev/flame_sta.c	2026-11-12 19:09:34.982333551 +0100
++++ b/bsd/dev/flame_sta.c	2026-11-12 19:47:42.851857374 +0100
 @@ -0,0 +1,249 @@
 +/*
 + * flame: the station side of sys/redwood_sta.h (ios-topaz 0900's topaz_sta.c) over the WCN3990 radio,
@@ -287,11 +285,10 @@ index 0000000..72b205c
 +	MiniIONetworkStackStart();              /* configd waits for it before it calls the registry quiet */
 +	flame_wlan_ready_hook = sta_ready;
 +}
+
 diff --git a/bsd/dev/flame_wlan.c b/bsd/dev/flame_wlan.c
-new file mode 100644
-index 0000000..dd8ed3b
---- /dev/null
-+++ b/bsd/dev/flame_wlan.c
+--- a/bsd/dev/flame_wlan.c	2026-11-12 19:09:34.985666840 +0100
++++ b/bsd/dev/flame_wlan.c	2026-11-12 19:47:42.851857374 +0100
 @@ -0,0 +1,477 @@
 +/*
 + * flame: the WCN3990 radio for the kernel's Wi-Fi station. bsd/dev/flame_sta.c (ios-topaz 0900's topaz_sta.c)
@@ -770,11 +767,10 @@ index 0000000..dd8ed3b
 +	printf("flame wlan: /dev/wlan ready (major %d)\n", major);
 +}
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
+
 diff --git a/bsd/dev/redwood_apple80211.c b/bsd/dev/redwood_apple80211.c
-new file mode 100644
-index 0000000..88cb5c9
---- /dev/null
-+++ b/bsd/dev/redwood_apple80211.c
+--- a/bsd/dev/redwood_apple80211.c	2026-11-12 19:09:34.985666840 +0100
++++ b/bsd/dev/redwood_apple80211.c	2026-11-12 19:47:42.851857374 +0100
 @@ -0,0 +1,803 @@
 +/*
 + * Darwin-on-redwood: Apple80211, answered in the kernel.
@@ -1579,11 +1575,10 @@ index 0000000..88cb5c9
 +	}
 +	return error;
 +}
+
 diff --git a/bsd/dev/redwood_net.c b/bsd/dev/redwood_net.c
-new file mode 100644
-index 0000000..e7b46fd
---- /dev/null
-+++ b/bsd/dev/redwood_net.c
+--- a/bsd/dev/redwood_net.c	2026-11-12 19:09:34.989000129 +0100
++++ b/bsd/dev/redwood_net.c	2026-11-12 19:47:42.851857374 +0100
 @@ -0,0 +1,376 @@
 +/*
 + * en0: a network interface that is Ethernet as far as the rest of the kernel and iOS can tell.
@@ -1961,11 +1956,10 @@ index 0000000..e7b46fd
 +	PE_parse_boot_argn("net_trace", &net_trace, sizeof(net_trace));
 +	PE_parse_boot_argn("net_names", &net_names, sizeof(net_names));
 +}
+
 diff --git a/bsd/dev/redwood_sta.c b/bsd/dev/redwood_sta.c
-new file mode 100644
-index 0000000..4c73786
---- /dev/null
-+++ b/bsd/dev/redwood_sta.c
+--- a/bsd/dev/redwood_sta.c	2026-11-12 19:09:34.989000129 +0100
++++ b/bsd/dev/redwood_sta.c	2026-11-12 19:47:42.851857374 +0100
 @@ -0,0 +1,375 @@
 +/*
 + * Darwin-on-redwood: what stands between the two sides of the station boundary
@@ -2342,11 +2336,10 @@ index 0000000..4c73786
 +	}
 +	return ops != NULL;
 +}
+
 diff --git a/bsd/dev/sweet_pmem.c b/bsd/dev/sweet_pmem.c
-new file mode 100644
-index 0000000..acb484a
---- /dev/null
-+++ b/bsd/dev/sweet_pmem.c
+--- a/bsd/dev/sweet_pmem.c	2026-11-12 19:09:34.989000129 +0100
++++ b/bsd/dev/sweet_pmem.c	2026-11-12 21:01:48.233757629 +0100
 @@ -0,0 +1,408 @@
 +/*
 + * /dev/pmem: physical memory for userland hardware experiments (the GPU
@@ -2756,126 +2749,11 @@ index 0000000..acb484a
 +	printf("SWEET PMEM: /dev/pmem ready (major %d)\n", major);
 +}
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
-diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
-index 2d88a34..aab47d6 100644
---- a/bsd/dev/sweet_rpmh.c
-+++ b/bsd/dev/sweet_rpmh.c
-@@ -444,4 +444,110 @@ out:
- 	__atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
- 	return error;
- }
-+/*
-+ * Generic RPMh write for /dev/pmem's PMEM_RPMH (userland bring-up of the modem
-+ * and WLAN: ARC levels of cx/mss, WLAN VRM rails, BCM bus votes). No policy:
-+ * a debugging path gated by the root-only device node and sweetpmem=1.
-+ */
-+int
-+sweet_rpmh_write(const char *res, unsigned n, const uint32_t *offsets, const uint32_t *values)
-+{
-+	if (!res || n == 0 || n > 4) {
-+		return EINVAL;
-+	}
-+	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
-+		return EBUSY;
-+	}
-+	int error = EIO;
-+	uint32_t address = 0;
-+	if (!rh_poisoned) {
-+		error = rh_map();
-+		if (!error) {
-+			error = rh_lookup(res, &address);
-+		}
-+		if (!error) {
-+			/* reuse rh_send's TCS slot logic but with generic commands */
-+			int chosen = -1;
-+			for (unsigned t = 0; t < RH_ACTIVE_N; ++t) {
-+				uint32_t b = t * RH_TCS_STRIDE;
-+				uint32_t enabled = rh_read(rh_tcs, b + RH_ENABLE);
-+				if (enabled & ~((1u << rh_ncpt) - 1u)) {
-+					continue;
-+				}
-+				bool busy = false;
-+				for (unsigned c = 0; c < rh_ncpt; ++c) {
-+					if ((enabled & (1u << c)) &&
-+					    (rh_read(rh_tcs, b + RH_ADDR + c * RH_CMD_STRIDE) & ~15u) == address) {
-+						busy = true;
-+						break;
-+					}
-+				}
-+				if (busy) {
-+					continue;
-+				}
-+				if (rh_free(t)) {
-+					chosen = (int)t;
-+					break;
-+				}
-+			}
-+			if (chosen < 0) {
-+				error = EBUSY;
-+			} else {
-+				unsigned t = (unsigned)chosen;
-+				uint32_t b = t * RH_TCS_STRIDE, bit = 1u << t;
-+				uint32_t irq_en = rh_read(rh_tcs, RH_IRQ_EN);
-+				if (irq_en == 0xffffffffu || !rh_free(t)) {
-+					error = EBUSY;
-+				} else {
-+					if (!rh_sync(RH_IRQ_EN, irq_en & ~bit)) {
-+						rh_poisoned = true;
-+						error = EIO;
-+					} else {
-+						rh_poisoned = true;
-+						uint32_t cmdmask = (1u << n) - 1u;
-+						bool ok = true;
-+						for (unsigned c = 0; ok && c < n; ++c) {
-+							uint32_t cmd = b + c * RH_CMD_STRIDE;
-+							ok = rh_sync(cmd + RH_MSGID, RH_WRITE_ACK) &&
-+							    rh_sync(cmd + RH_ADDR, address + offsets[c]) &&
-+							    rh_sync(cmd + RH_DATA, values[c]);
-+						}
-+						if (ok) {
-+							ok = rh_sync(b + RH_WAIT, cmdmask) &&
-+							    rh_sync(b + RH_ENABLE, cmdmask) &&
-+							    rh_sync(b + RH_CONTROL, 0) &&
-+							    rh_sync(b + RH_CONTROL, RH_AMC_EN);
-+							rh_write(rh_tcs, b + RH_CONTROL, RH_AMC_EN | RH_TRIGGER);
-+							/* wait for completion */
-+							if (ok) {
-+								for (unsigned us = 0; us < RH_TIMEOUT_US; ++us) {
-+									uint32_t irq = rh_read(rh_tcs, RH_IRQ_STATUS);
-+									uint32_t idle = rh_read(rh_tcs, b + RH_STATUS);
-+									bool complete = true;
-+									for (unsigned c = 0; c < n; ++c) {
-+										uint32_t st = rh_read(rh_tcs, b + RH_CMD_STATUS + c * RH_CMD_STRIDE);
-+										complete &= st != 0xffffffffu &&
-+										    (st & (RH_ISSUED | RH_COMPLETE)) == (RH_ISSUED | RH_COMPLETE);
-+									}
-+									bool progress = idle == 0 || !complete;
-+									if (idle && idle != 0xffffffffu && irq != 0xffffffffu &&
-+									    ((irq & bit) || progress) && complete) {
-+										break;
-+									}
-+									delay(1);
-+								}
-+							}
-+							error = ok ? 0 : EIO;
-+						} else {
-+							error = EIO;
-+						}
-+					}
-+				}
-+			}
-+		}
-+	}
-+	__atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
-+	return error;
-+}
-+
- #endif /* ARM64_BOARD_CONFIG_SWEET */
+
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index 27caa07..b052a5a 100644
---- a/bsd/dev/sweet_ufs.c
-+++ b/bsd/dev/sweet_ufs.c
-@@ -75,6 +75,8 @@ extern void sweet_usb_probe(void);
+--- a/bsd/dev/sweet_ufs.c	2026-11-06 10:41:12.000000000 +0100
++++ b/bsd/dev/sweet_ufs.c	2026-11-12 19:47:42.851857374 +0100
+@@ -75,6 +75,8 @@
  extern void sweet_cpufreq_max(void);
  extern void sweet_charger_start(void);
  extern void sweet_a630_probe(void);
@@ -2884,7 +2762,7 @@ index 27caa07..b052a5a 100644
  
  #define REG_CAP         0x00
  #define REG_IS          0x20
-@@ -1155,6 +1157,8 @@ sweet_ufs_init(void)
+@@ -1155,6 +1157,8 @@
  	sweet_touch_init();
  	sweet_usb_probe();
  	sweet_a630_probe();	/* sweetgpu=N, beryllium only, off by default */
@@ -2893,11 +2771,10 @@ index 27caa07..b052a5a 100644
  	beryllium_wlan_init();      /* boot-arg sweetwlan=N, off by default */
  	return 0;
  }
+
 diff --git a/bsd/sys/flame_wlan.h b/bsd/sys/flame_wlan.h
-new file mode 100644
-index 0000000..9107cbb
---- /dev/null
-+++ b/bsd/sys/flame_wlan.h
+--- a/bsd/sys/flame_wlan.h	2026-11-12 19:09:34.992333418 +0100
++++ b/bsd/sys/flame_wlan.h	2026-11-12 19:47:42.851857374 +0100
 @@ -0,0 +1,69 @@
 +/*
 + * /dev/wlan: the kernel's Wi-Fi station (bsd/dev/flame_wlan.c, under en0 and wifid's Apple80211 requests,
@@ -2968,22 +2845,20 @@ index 0000000..9107cbb
 +};
 +
 +#endif
+
 diff --git a/bsd/sys/redwood_input.h b/bsd/sys/redwood_input.h
-new file mode 100644
-index 0000000..c5dbd02
---- /dev/null
-+++ b/bsd/sys/redwood_input.h
+--- a/bsd/sys/redwood_input.h	2026-11-12 19:09:34.995666707 +0100
++++ b/bsd/sys/redwood_input.h	2026-11-12 19:47:42.851857374 +0100
 @@ -0,0 +1,5 @@
 +/* topaz: the one thing the station files take from redwood_input.h */
 +#ifndef _SYS_REDWOOD_INPUT_H_
 +#define _SYS_REDWOOD_INPUT_H_
 +#define redwood_wifi_tell(...) printf(__VA_ARGS__)
 +#endif
+
 diff --git a/bsd/sys/redwood_net.h b/bsd/sys/redwood_net.h
-new file mode 100644
-index 0000000..41550ce
---- /dev/null
-+++ b/bsd/sys/redwood_net.h
+--- a/bsd/sys/redwood_net.h	2026-11-12 19:09:34.995666707 +0100
++++ b/bsd/sys/redwood_net.h	2026-11-12 19:47:42.851857374 +0100
 @@ -0,0 +1,63 @@
 +/*
 + * en0, and what stands behind it.
@@ -3048,11 +2923,10 @@ index 0000000..41550ce
 +#endif /* KERNEL */
 +
 +#endif /* _SYS_REDWOOD_NET_H_ */
+
 diff --git a/bsd/sys/redwood_sta.h b/bsd/sys/redwood_sta.h
-new file mode 100644
-index 0000000..15b2ce1
---- /dev/null
-+++ b/bsd/sys/redwood_sta.h
+--- a/bsd/sys/redwood_sta.h	2026-11-12 19:09:34.995666707 +0100
++++ b/bsd/sys/redwood_sta.h	2026-11-12 19:47:42.851857374 +0100
 @@ -0,0 +1,123 @@
 +/*
 + * Darwin-on-redwood: the station boundary.
@@ -3177,11 +3051,10 @@ index 0000000..15b2ce1
 +#endif
 +
 +#endif
+
 diff --git a/iokit/Kernel/arm/RedwoodWLAN.cpp b/iokit/Kernel/arm/RedwoodWLAN.cpp
-new file mode 100644
-index 0000000..51684f9
---- /dev/null
-+++ b/iokit/Kernel/arm/RedwoodWLAN.cpp
+--- a/iokit/Kernel/arm/RedwoodWLAN.cpp	2026-11-12 19:09:34.998999996 +0100
++++ b/iokit/Kernel/arm/RedwoodWLAN.cpp	2026-11-12 19:47:42.851857374 +0100
 @@ -0,0 +1,131 @@
 +/*
 + * RedwoodWLAN: the registry entries by which iOS finds the Wi-Fi interface.
@@ -3314,10 +3187,10 @@ index 0000000..51684f9
 +	}
 +	controller->release();
 +}
+
 diff --git a/iokit/Kernel/arm/SweetNetwork.cpp b/iokit/Kernel/arm/SweetNetwork.cpp
-index 3c97872..6cf08ee 100644
---- a/iokit/Kernel/arm/SweetNetwork.cpp
-+++ b/iokit/Kernel/arm/SweetNetwork.cpp
+--- a/iokit/Kernel/arm/SweetNetwork.cpp	2026-11-06 10:41:11.000000000 +0100
++++ b/iokit/Kernel/arm/SweetNetwork.cpp	2026-11-12 19:47:42.851857374 +0100
 @@ -43,6 +43,7 @@
  #include <libkern/c++/OSData.h>
  #include <libkern/c++/OSDictionary.h>
@@ -3340,7 +3213,7 @@ index 3c97872..6cf08ee 100644
  OSDefineMetaClassAndStructors(SweetNetService, IOService);
  
  IOReturn
-@@ -74,9 +68,6 @@ SweetNetService::newUserClient(task_t owningTask, void *securityID, UInt32 type,
+@@ -74,9 +68,6 @@
  	return ret;
  }
  
@@ -3350,7 +3223,7 @@ index 3c97872..6cf08ee 100644
  OSDefineMetaClassAndStructors(IONetworkInterface, SweetNetService);
  
  class IOEthernetInterface : public IONetworkInterface {
-@@ -179,6 +170,25 @@ sweet_net_set_overrides(IOService *intf, const char *ip, const char *mask,
+@@ -179,6 +170,25 @@
  	OSSafeReleaseNULL(gw);
  }
  
@@ -3376,7 +3249,7 @@ index 3c97872..6cf08ee 100644
  /*
   * Publish bus -> controller -> interface for one BSD ifnet, plus the
   * IONetworkStack (once). Called by sweet_usb.c after creating its ifnet.
-@@ -189,7 +199,6 @@ sweet_net_publish(const char *bsd_name, const char *prefix, unsigned unit,
+@@ -189,7 +199,6 @@
      const uint8_t *mac, const char *ip, const char *mask, const char *router,
      const char *dns1, const char *dns2)
  {
@@ -3384,7 +3257,7 @@ index 3c97872..6cf08ee 100644
  	IOService *platform = IOService::getPlatform();
  
  	if (platform == NULL) {
-@@ -197,15 +206,7 @@ sweet_net_publish(const char *bsd_name, const char *prefix, unsigned unit,
+@@ -197,15 +206,7 @@
  		return 0;
  	}
  
@@ -3401,11 +3274,10 @@ index 3c97872..6cf08ee 100644
  
  	SweetNetworkBus *bus = OSTypeAlloc(SweetNetworkBus);
  	if (bus == NULL || !bus->init()) {
+
 diff --git a/iokit/Kernel/arm/SweetNetwork.h b/iokit/Kernel/arm/SweetNetwork.h
-new file mode 100644
-index 0000000..ea36ece
---- /dev/null
-+++ b/iokit/Kernel/arm/SweetNetwork.h
+--- a/iokit/Kernel/arm/SweetNetwork.h	2026-11-12 19:09:35.002333285 +0100
++++ b/iokit/Kernel/arm/SweetNetwork.h	2026-11-12 19:47:42.851857374 +0100
 @@ -0,0 +1,23 @@
 +/* Shared network registry classes; implemented once in SweetNetwork.cpp. */
 +#ifndef SWEET_NETWORK_H
@@ -3430,11 +3302,11 @@ index 0000000..ea36ece
 +extern "C" void MiniIONetworkStackStart(void);
 +#endif
 +#endif
+
 diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
-index b0409b5..fb025f0 100644
---- a/iokit/conf/files.arm64
-+++ b/iokit/conf/files.arm64
-@@ -10,6 +10,7 @@ iokit/Kernel/arm/AppleARMSMP.cpp    					optional iokitcpp
+--- a/iokit/conf/files.arm64	2026-11-06 10:41:11.000000000 +0100
++++ b/iokit/conf/files.arm64	2026-11-12 19:47:42.851857374 +0100
+@@ -10,6 +10,7 @@
  ./Exclaves/IOService.tightbeam.c		optional iokitcpp config_exclaves
  # SWEET device-tree platform (empty translation unit on other boards)
  iokit/Kernel/arm/SweetPlatformExpert.cpp                         optional iokitcpp
@@ -3442,3 +3314,139 @@ index b0409b5..fb025f0 100644
  
  iokit/Kernel/arm/SweetCPU.cpp                                    optional iokitcpp
  iokit/Kernel/arm/SweetBusy.cpp                                   optional iokitcpp
+
+diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
+--- a/bsd/dev/sweet_rpmh.c	2026-11-06 10:41:10.000000000 +0100
++++ b/bsd/dev/sweet_rpmh.c	2026-11-12 21:20:37.537743363 +0100
+@@ -56,6 +56,7 @@
+ #define RH_DB_ENTRY     24u
+ #define RH_DB_MAX       0x100000u /* policy bound, not a DT size */
+ #define RH_VRM          4u
++#define RH_ARC          3u
+ #define RH_TIMEOUT_US   100000u
+ 
+ static vm_offset_t rh_rsc, rh_tcs, rh_dict, rh_db;
+@@ -201,9 +202,9 @@
+ 				continue;
+ 			}
+ 			uint32_t addr = rh_read(rh_db, e + 16);
+-			if (slave != RH_VRM || (addr >> 16) != RH_VRM || (addr & 15u) ||
++			if ((slave != RH_VRM && slave != RH_ARC) || (addr >> 16) != slave || (addr & 15u) ||
+ 			    !rh_range(aux + rh_db16(e + 22), rh_db16(e + 20))) {
+-				printf("SWEET RPMH: invalid VRM entry for %s\n", res);
++				printf("SWEET RPMH: invalid VRM/ARC entry for %s\n", res);
+ 				return EINVAL;
+ 			}
+ 			*address = addr;
+@@ -444,4 +445,110 @@
+ 	__atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
+ 	return error;
+ }
++/*
++ * Generic RPMh write for /dev/pmem's PMEM_RPMH (userland bring-up of the modem
++ * and WLAN: ARC levels of cx/mss, WLAN VRM rails, BCM bus votes). No policy:
++ * a debugging path gated by the root-only device node and sweetpmem=1.
++ */
++int
++sweet_rpmh_write(const char *res, unsigned n, const uint32_t *offsets, const uint32_t *values)
++{
++	if (!res || n == 0 || n > 4) {
++		return EINVAL;
++	}
++	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
++		return EBUSY;
++	}
++	int error = EIO;
++	uint32_t address = 0;
++	if (!rh_poisoned) {
++		error = rh_map();
++		if (!error) {
++			error = rh_lookup(res, &address);
++		}
++		if (!error) {
++			/* reuse rh_send's TCS slot logic but with generic commands */
++			int chosen = -1;
++			for (unsigned t = 0; t < RH_ACTIVE_N; ++t) {
++				uint32_t b = t * RH_TCS_STRIDE;
++				uint32_t enabled = rh_read(rh_tcs, b + RH_ENABLE);
++				if (enabled & ~((1u << rh_ncpt) - 1u)) {
++					continue;
++				}
++				bool busy = false;
++				for (unsigned c = 0; c < rh_ncpt; ++c) {
++					if ((enabled & (1u << c)) &&
++					    (rh_read(rh_tcs, b + RH_ADDR + c * RH_CMD_STRIDE) & ~15u) == address) {
++						busy = true;
++						break;
++					}
++				}
++				if (busy) {
++					continue;
++				}
++				if (rh_free(t)) {
++					chosen = (int)t;
++					break;
++				}
++			}
++			if (chosen < 0) {
++				error = EBUSY;
++			} else {
++				unsigned t = (unsigned)chosen;
++				uint32_t b = t * RH_TCS_STRIDE, bit = 1u << t;
++				uint32_t irq_en = rh_read(rh_tcs, RH_IRQ_EN);
++				if (irq_en == 0xffffffffu || !rh_free(t)) {
++					error = EBUSY;
++				} else {
++					if (!rh_sync(RH_IRQ_EN, irq_en & ~bit)) {
++						rh_poisoned = true;
++						error = EIO;
++					} else {
++						rh_poisoned = true;
++						uint32_t cmdmask = (1u << n) - 1u;
++						bool ok = true;
++						for (unsigned c = 0; ok && c < n; ++c) {
++							uint32_t cmd = b + c * RH_CMD_STRIDE;
++							ok = rh_sync(cmd + RH_MSGID, RH_WRITE_ACK) &&
++							    rh_sync(cmd + RH_ADDR, address + offsets[c]) &&
++							    rh_sync(cmd + RH_DATA, values[c]);
++						}
++						if (ok) {
++							ok = rh_sync(b + RH_WAIT, cmdmask) &&
++							    rh_sync(b + RH_ENABLE, cmdmask) &&
++							    rh_sync(b + RH_CONTROL, 0) &&
++							    rh_sync(b + RH_CONTROL, RH_AMC_EN);
++							rh_write(rh_tcs, b + RH_CONTROL, RH_AMC_EN | RH_TRIGGER);
++							/* wait for completion */
++							if (ok) {
++								for (unsigned us = 0; us < RH_TIMEOUT_US; ++us) {
++									uint32_t irq = rh_read(rh_tcs, RH_IRQ_STATUS);
++									uint32_t idle = rh_read(rh_tcs, b + RH_STATUS);
++									bool complete = true;
++									for (unsigned c = 0; c < n; ++c) {
++										uint32_t st = rh_read(rh_tcs, b + RH_CMD_STATUS + c * RH_CMD_STRIDE);
++										complete &= st != 0xffffffffu &&
++										    (st & (RH_ISSUED | RH_COMPLETE)) == (RH_ISSUED | RH_COMPLETE);
++									}
++									bool progress = idle == 0 || !complete;
++									if (idle && idle != 0xffffffffu && irq != 0xffffffffu &&
++									    ((irq & bit) || progress) && complete) {
++										break;
++									}
++									delay(1);
++								}
++							}
++							error = ok ? 0 : EIO;
++						} else {
++							error = EIO;
++						}
++					}
++				}
++			}
++		}
++	}
++	__atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
++	return error;
++}
++
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+

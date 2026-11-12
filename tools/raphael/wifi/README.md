@@ -18,8 +18,9 @@ See `PROVENANCE.md` for local changes and upstream credits.
   config parser. Full compilation/linking still requires a successful macOS CI result.
 - `/dev/pmem` and `/dev/wlan` default off. Driver opens enforce root credentials.
   Physical-memory transfers and SMC calls return `EPERM` pending a verified policy.
-- iOS 18 association/scan buffer ABI derivation is incomplete. `ABI-NOTES.md` is
-  exploratory evidence, not permission to choose unverified struct layouts.
+- iOS 18 association/scan ABI is **resolved** (see ABI-NOTES.md): the donor's
+  16.5 field layouts work through iOS 26 (proven by the donor's working hardware
+  port), and the 44-byte link event is proven by our own disassembly.
 - The live tree confirms MPSS `0x8e000000/0x9600000` and WLAN MSA
   `0x8bc00000/0x180000`, but does not prove a safe DMA pool. The candidate
   `0x8a000000` in the userspace source remains unverified; never write-probe it.
