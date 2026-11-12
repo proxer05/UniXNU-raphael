@@ -2767,7 +2767,7 @@ index 0000000..acb484a
 +}
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
-index 2d88a34..bd3635b 100644
+index 2d88a34..f05de5a 100644
 --- a/bsd/dev/sweet_rpmh.c
 +++ b/bsd/dev/sweet_rpmh.c
 @@ -56,6 +56,7 @@ int sweet_rpmh_vreg_set(const char *res, unsigned mv, bool enable);
@@ -2790,19 +2790,23 @@ index 2d88a34..bd3635b 100644
  				return EINVAL;
  			}
  			*address = addr;
-@@ -444,4 +445,110 @@ out:
+@@ -444,4 +445,138 @@ out:
  	__atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
  	return error;
  }
 +/*
 + * Generic RPMh write for /dev/pmem's PMEM_RPMH (userland bring-up of the modem
-+ * and WLAN: ARC levels of cx/mss, WLAN VRM rails, BCM bus votes). No policy:
-+ * a debugging path gated by the root-only device node and sweetpmem=1.
++ * and WLAN: ARC levels of cx/mss, WLAN VRM rails, BCM bus votes). Same TCS
++ * discipline as rh_send above: one empty idle ACTIVE TCS, IRQ masked for it,
++ * poisoned on entry until completion is proven, full slot cleanup afterwards
++ * (CONTROL, ENABLE, WAIT back to zero, our IRQ acknowledged, IRQ_EN restored),
++ * ETIMEDOUT (not silent success) when the trigger does not complete. No policy
++ * on purpose: a debugging path gated by the root-only device and sweetpmem=1.
 + */
 +int
 +sweet_rpmh_write(const char *res, unsigned n, const uint32_t *offsets, const uint32_t *values)
 +{
-+	if (!res || n == 0 || n > 4) {
++	if (!res || n == 0 || n > rh_ncpt || n > 4) {
 +		return EINVAL;
 +	}
 +	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
@@ -2816,7 +2820,7 @@ index 2d88a34..bd3635b 100644
 +			error = rh_lookup(res, &address);
 +		}
 +		if (!error) {
-+			/* reuse rh_send's TCS slot logic but with generic commands */
++			/* rh_send's slot search, generalized: skip foreign and conflicting slots. */
 +			int chosen = -1;
 +			for (unsigned t = 0; t < RH_ACTIVE_N; ++t) {
 +				uint32_t b = t * RH_TCS_STRIDE;
@@ -2824,23 +2828,20 @@ index 2d88a34..bd3635b 100644
 +				if (enabled & ~((1u << rh_ncpt) - 1u)) {
 +					continue;
 +				}
-+				bool busy = false;
++				bool conflict = false;
 +				for (unsigned c = 0; c < rh_ncpt; ++c) {
 +					if ((enabled & (1u << c)) &&
 +					    (rh_read(rh_tcs, b + RH_ADDR + c * RH_CMD_STRIDE) & ~15u) == address) {
-+						busy = true;
++						conflict = true;
 +						break;
 +					}
 +				}
-+				if (busy) {
-+					continue;
-+				}
-+				if (rh_free(t)) {
++				if (!conflict && chosen < 0 && rh_free(t)) {
 +					chosen = (int)t;
-+					break;
 +				}
 +			}
 +			if (chosen < 0) {
++				printf("SWEET RPMH: no empty idle ACTIVE TCS for %s\n", res);
 +				error = EBUSY;
 +			} else {
 +				unsigned t = (unsigned)chosen;
@@ -2848,58 +2849,85 @@ index 2d88a34..bd3635b 100644
 +				uint32_t irq_en = rh_read(rh_tcs, RH_IRQ_EN);
 +				if (irq_en == 0xffffffffu || !rh_free(t)) {
 +					error = EBUSY;
++				} else if (!rh_sync(RH_IRQ_EN, irq_en & ~bit)) {
++					rh_poisoned = true;
++					error = EIO;
++				} else if (!rh_free(t)) {
++					/* No payload was touched. Do not acknowledge somebody else's IRQ. */
++					(void)rh_sync(RH_IRQ_EN, (rh_read(rh_tcs, RH_IRQ_EN) & ~bit) | (irq_en & bit));
++					error = EBUSY;
 +				} else {
-+					if (!rh_sync(RH_IRQ_EN, irq_en & ~bit)) {
-+						rh_poisoned = true;
++					/* From here an uncertain write/timeout quarantines our slot for this boot. */
++					rh_poisoned = true;
++					const uint32_t cmdmask = (1u << n) - 1u;
++					bool ok = true;
++					for (unsigned c = 0; ok && c < n; ++c) {
++						uint32_t cmd = b + c * RH_CMD_STRIDE;
++						ok = rh_sync(cmd + RH_MSGID, RH_WRITE_ACK) &&
++						    rh_sync(cmd + RH_ADDR, address + offsets[c]) &&
++						    rh_sync(cmd + RH_DATA, values[c]);
++					}
++					if (ok) {
++						ok = rh_sync(b + RH_WAIT, cmdmask) &&
++						    rh_sync(b + RH_ENABLE, cmdmask) &&
++						    rh_sync(b + RH_CONTROL, 0) &&
++						    rh_sync(b + RH_CONTROL, RH_AMC_EN);
++					}
++					if (!ok) {
 +						error = EIO;
 +					} else {
-+						rh_poisoned = true;
-+						uint32_t cmdmask = (1u << n) - 1u;
-+						bool ok = true;
-+						for (unsigned c = 0; ok && c < n; ++c) {
-+							uint32_t cmd = b + c * RH_CMD_STRIDE;
-+							ok = rh_sync(cmd + RH_MSGID, RH_WRITE_ACK) &&
-+							    rh_sync(cmd + RH_ADDR, address + offsets[c]) &&
-+							    rh_sync(cmd + RH_DATA, values[c]);
-+						}
-+						if (ok) {
-+							ok = rh_sync(b + RH_WAIT, cmdmask) &&
-+							    rh_sync(b + RH_ENABLE, cmdmask) &&
-+							    rh_sync(b + RH_CONTROL, 0) &&
-+							    rh_sync(b + RH_CONTROL, RH_AMC_EN);
-+							rh_write(rh_tcs, b + RH_CONTROL, RH_AMC_EN | RH_TRIGGER);
-+							/* wait for completion */
-+							if (ok) {
-+								for (unsigned us = 0; us < RH_TIMEOUT_US; ++us) {
-+									uint32_t irq = rh_read(rh_tcs, RH_IRQ_STATUS);
-+									uint32_t idle = rh_read(rh_tcs, b + RH_STATUS);
-+									bool complete = true;
-+									for (unsigned c = 0; c < n; ++c) {
-+										uint32_t st = rh_read(rh_tcs, b + RH_CMD_STATUS + c * RH_CMD_STRIDE);
-+										complete &= st != 0xffffffffu &&
-+										    (st & (RH_ISSUED | RH_COMPLETE)) == (RH_ISSUED | RH_COMPLETE);
-+									}
-+									bool progress = idle == 0 || !complete;
-+									if (idle && idle != 0xffffffffu && irq != 0xffffffffu &&
-+									    ((irq & bit) || progress) && complete) {
-+										break;
-+									}
-+									delay(1);
-+								}
++						rh_write(rh_tcs, b + RH_CONTROL, RH_AMC_EN | RH_TRIGGER);
++						uint32_t irq = 0, idle = 0;
++						bool done = false, progress = false;
++						for (unsigned us = 0; us < RH_TIMEOUT_US; ++us) {
++							irq = rh_read(rh_tcs, RH_IRQ_STATUS);
++							idle = rh_read(rh_tcs, b + RH_STATUS);
++							bool complete = true;
++							for (unsigned c = 0; c < n; ++c) {
++								uint32_t st = rh_read(rh_tcs, b + RH_CMD_STATUS + c * RH_CMD_STRIDE);
++								complete &= st != 0xffffffffu &&
++								    (st & (RH_ISSUED | RH_COMPLETE)) == (RH_ISSUED | RH_COMPLETE);
 +							}
-+							error = ok ? 0 : EIO;
-+						} else {
++							/* A fresh IRQ or observed execution transition excludes stale CMD_STATUS. */
++							progress |= idle == 0 || !complete;
++							if (idle && idle != 0xffffffffu && irq != 0xffffffffu &&
++							    ((irq & bit) || progress) && complete) {
++								done = true;
++								break;
++							}
++							delay(1);
++						}
++						printf("SWEET RPMH: TCS%u %s n=%u done=%d irq=%#x idle=%#x\n",
++						    t, res, n, done, irq, idle);
++						if (!done) {
++							printf("SWEET RPMH: timeout; TCS quarantined, IRQ remains masked; no reset/retry\n");
++							error = ETIMEDOUT;
++						} else if (!rh_sync(b + RH_CONTROL, RH_AMC_EN) ||
++						    !rh_sync(b + RH_CONTROL, 0) ||
++						    !rh_sync(b + RH_ENABLE, 0) ||
++						    !rh_sync(b + RH_WAIT, 0)) {
 +							error = EIO;
++						} else {
++							rh_write(rh_tcs, RH_IRQ_CLEAR, bit); /* W1C: never clear other TCS bits */
++							if ((rh_read(rh_tcs, RH_IRQ_STATUS) & bit) ||
++							    !rh_sync(RH_IRQ_EN, (rh_read(rh_tcs, RH_IRQ_EN) & ~bit) | (irq_en & bit))) {
++								error = EIO;
++							} else {
++								rh_poisoned = false;
++								error = 0;
++							}
 +						}
 +					}
 +				}
 +			}
 +		}
 +	}
++	if (error) {
++		printf("SWEET RPMH: write %s failed errno=%d\n", res, error);
++	}
 +	__atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
 +	return error;
 +}
-+
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 index 27caa07..b052a5a 100644
