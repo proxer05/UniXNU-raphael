@@ -3139,42 +3139,93 @@ index 0000000..51684f9
 +	controller->release();
 +}
 diff --git a/iokit/Kernel/arm/SweetNetwork.cpp b/iokit/Kernel/arm/SweetNetwork.cpp
-index 3c97872..cacf876 100644
+index 3c97872..412bdf6 100644
 --- a/iokit/Kernel/arm/SweetNetwork.cpp
 +++ b/iokit/Kernel/arm/SweetNetwork.cpp
-@@ -43,6 +43,7 @@
+@@ -43,19 +43,10 @@
  #include <libkern/c++/OSData.h>
  #include <libkern/c++/OSDictionary.h>
  #include <libkern/c++/OSString.h>
 +#include "SweetNetwork.h"
  
- /*
-  * Common base: log which process asks for a user client on any of our
-@@ -50,13 +51,6 @@
-  * has kIOUserClientClassKey set so it succeeds; the others answer
-  * kIOReturnUnsupported, as an IOService without a user client does).
-  */
--class SweetNetService : public IOService {
--	OSDeclareDefaultStructors(SweetNetService);
+-/*
+- * Common base: log which process asks for a user client on any of our
+- * objects (the first 64 requests), then behave like IOService (the stack
+- * has kIOUserClientClassKey set so it succeeds; the others answer
+- * kIOReturnUnsupported, as an IOService without a user client does).
+- */
+ class SweetNetService : public IOService {
+ 	OSDeclareDefaultStructors(SweetNetService);
 -public:
 -	IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type,
 -	    OSDictionary *properties, IOUserClient **handler) APPLE_KEXT_OVERRIDE;
 -	using IOService::newUserClient;
--};
+ };
  OSDefineMetaClassAndStructors(SweetNetService, IOService);
  
- IOReturn
-@@ -74,9 +68,6 @@ SweetNetService::newUserClient(task_t owningTask, void *securityID, UInt32 type,
- 	return ret;
- }
- 
--class IONetworkInterface : public SweetNetService {
--	OSDeclareDefaultStructors(IONetworkInterface);
--};
+@@ -79,6 +70,61 @@ class IONetworkInterface : public SweetNetService {
+ };
  OSDefineMetaClassAndStructors(IONetworkInterface, SweetNetService);
  
++class IONetworkStack : public SweetNetService {
++	OSDeclareDefaultStructors(IONetworkStack);
++};
++OSDefineMetaClassAndStructors(IONetworkStack, SweetNetService);
++
++class SweetNetworkBus : public IOService {
++	OSDeclareDefaultStructors(SweetNetworkBus);
++};
++OSDefineMetaClassAndStructors(SweetNetworkBus, IOService);
++
++class SweetEthernetController : public SweetNetService {
++	OSDeclareDefaultStructors(SweetEthernetController);
++};
++OSDefineMetaClassAndStructors(SweetEthernetController, SweetNetService);
++
++class SweetNetworkStackUserClient : public IOUserClient {
++	OSDeclareDefaultStructors(SweetNetworkStackUserClient);
++public:
++	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
++};
++OSDefineMetaClassAndStructors(SweetNetworkStackUserClient, IOUserClient);
++
++IOReturn
++SweetNetworkStackUserClient::clientClose(void)
++{
++	terminate();
++	return kIOReturnSuccess;
++}
++
++
++/*
++ * Common base: log which process asks for a user client on any of our
++ * objects (the first 64 requests), then behave like IOService (the stack
++ * has kIOUserClientClassKey set so it succeeds; the others answer
++ * kIOReturnUnsupported, as an IOService without a user client does).
++ */
++OSDefineMetaClassAndStructors(SweetNetService, IOService);
++
++IOReturn
++SweetNetService::newUserClient(task_t owningTask, void *securityID, UInt32 type,
++    OSDictionary *properties, IOUserClient **handler)
++{
++	static volatile SInt32 count;
++	IOReturn ret = IOService::newUserClient(owningTask, securityID, type, properties, handler);
++	if (OSIncrementAtomic(&count) < 64) {
++		char name[32] = "?";
++		proc_selfname(name, sizeof(name));
++		IOLog("SWEET NET: %s opened %s user client (type %u): 0x%x\n",
++		    name, getMetaClass()->getClassName(), (unsigned)type, (unsigned)ret);
++	}
++	return ret;
++}
++
++OSDefineMetaClassAndStructors(IONetworkInterface, SweetNetService);
++
  class IOEthernetInterface : public IONetworkInterface {
-@@ -94,10 +85,7 @@ class SweetNetworkBus : public IOService {
+ 	OSDeclareDefaultStructors(IOEthernetInterface);
+ };
+@@ -94,10 +140,7 @@ class SweetNetworkBus : public IOService {
  };
  OSDefineMetaClassAndStructors(SweetNetworkBus, IOService);
  
@@ -3186,7 +3237,7 @@ index 3c97872..cacf876 100644
  
  class SweetNetworkStackUserClient : public IOUserClient {
  	OSDeclareDefaultStructors(SweetNetworkStackUserClient);
-@@ -179,6 +167,25 @@ sweet_net_set_overrides(IOService *intf, const char *ip, const char *mask,
+@@ -179,6 +222,25 @@ sweet_net_set_overrides(IOService *intf, const char *ip, const char *mask,
  	OSSafeReleaseNULL(gw);
  }
  
@@ -3212,7 +3263,7 @@ index 3c97872..cacf876 100644
  /*
   * Publish bus -> controller -> interface for one BSD ifnet, plus the
   * IONetworkStack (once). Called by sweet_usb.c after creating its ifnet.
-@@ -189,7 +196,6 @@ sweet_net_publish(const char *bsd_name, const char *prefix, unsigned unit,
+@@ -189,7 +251,6 @@ sweet_net_publish(const char *bsd_name, const char *prefix, unsigned unit,
      const uint8_t *mac, const char *ip, const char *mask, const char *router,
      const char *dns1, const char *dns2)
  {
@@ -3220,7 +3271,7 @@ index 3c97872..cacf876 100644
  	IOService *platform = IOService::getPlatform();
  
  	if (platform == NULL) {
-@@ -197,15 +203,7 @@ sweet_net_publish(const char *bsd_name, const char *prefix, unsigned unit,
+@@ -197,15 +258,7 @@ sweet_net_publish(const char *bsd_name, const char *prefix, unsigned unit,
  		return 0;
  	}
  
