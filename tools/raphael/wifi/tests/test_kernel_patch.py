@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[4]
 PATCH = ROOT / 'xnu/patches-11215/0263-raphael-wifi-bridge.patch'
 BSD_FILES = ('flame_sta.c', 'flame_wlan.c', 'redwood_apple80211.c',
              'redwood_net.c', 'redwood_sta.c', 'sweet_pmem.c', 'sweet_rpmh.c')
-IOKIT_FILES = ('RedwoodWLAN.cpp',)
+IOKIT_FILES = ('RedwoodWLAN.cpp', 'SweetNetwork.cpp', 'SweetNetwork.h')
 HEADERS = ('flame_wlan.h', 'redwood_input.h', 'redwood_net.h', 'redwood_sta.h')
 
 
@@ -34,15 +34,15 @@ class KernelPatchTests(unittest.TestCase):
         expected.update('bsd/dev/' + name for name in BSD_FILES)
         expected.update('bsd/sys/' + name for name in HEADERS)
         expected.update('iokit/Kernel/arm/' + name for name in IOKIT_FILES)
-        expected.update(('iokit/Kernel/arm/SweetNetwork.cpp', 'iokit/Kernel/arm/SweetNetwork.h'))
+        pass  # all files already listed above
         self.assertEqual(set(sections()), expected)
 
     def test_build_registration_complete(self):
         parts = sections()
         bsd = added(parts['bsd/conf/files'])
         for name in BSD_FILES:
-            if name == 'sweet_rpmh.c':
-                continue  # already registered by an earlier Bergamota patch
+            if name == 'sweet_rpmh.c' and 'bsd/dev/sweet_rpmh.c' not in sections():
+                continue  # only in newer patches
         iokit = added(parts['iokit/conf/files.arm64'])
         for name in IOKIT_FILES:
             self.assertTrue(any(line.split() == ['iokit/Kernel/arm/' + name, 'optional', 'iokitcpp']
