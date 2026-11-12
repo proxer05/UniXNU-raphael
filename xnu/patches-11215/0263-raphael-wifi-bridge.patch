@@ -1,29 +1,3 @@
-From: Raphael Wi-Fi port <port@local>
-Subject: [PATCH] 0263: compile-only WCN3990 station bridge for xnu-11215
-
-Adapted from IOS-26-Hot commit d249939b9c36380afaee1a76cf167aeee8347475,
-patches 0094/0123 and selected Wi-Fi portions of 0146. Keep the donor
-identifiers so protocol interfaces remain traceable during the backport.
-
-Register six BSD sources and the Wi-Fi IOKit service without changing existing
-SweetPlatformExpert registration, GPU surface layout, or IOKit startup.
-Reuse SweetNetwork.cpp's IONetworkInterface and IONetworkStack definitions;
-share their header with RedwoodWLAN and expose idempotent stack publication.
-Do not compile the donor's colliding MiniIONetworkStack definitions.
-Add startup hooks for /dev/pmem and /dev/wlan, both disabled by default.
-
-This is a compilation milestone, not a working or hardware-ready Wi-Fi port.
-The Apple80211 association/scan ABI still needs verification against iOS 18.
-The 44-byte link-event layout is a derivation candidate recorded in ABI-NOTES.
-Driver open callbacks enforce root credentials. Physical reads/writes and
-caller-selected SMC operations return EPERM pending a verified access policy.
-Allocation requests are bounded to 32 MiB. Do not enable radio bring-up or
-write-probe reserved memory; a no-map device-tree entry is not free memory.
-
-Full kernel compilation/linking and on-device behavior remain unverified.
-No firmware, SDK headers, compiler dependency output or generated binaries
-are included in this patch. MIT notice for the donor accompanies the sources.
-
 diff --git a/bsd/conf/files b/bsd/conf/files
 index ea5a65a..fe6fac5 100644
 --- a/bsd/conf/files
@@ -298,8 +272,9 @@ index 0000000..72b205c
 +	flame_wlan_ready_hook = sta_ready;
 +}
 diff --git a/bsd/dev/flame_wlan.c b/bsd/dev/flame_wlan.c
-index e69de29..c422cd0 100644
---- a/bsd/dev/flame_wlan.c
+new file mode 100644
+index 0000000..c422cd0
+--- /dev/null
 +++ b/bsd/dev/flame_wlan.c
 @@ -0,0 +1,511 @@
 +/*
@@ -2988,8 +2963,9 @@ index 27caa07..b052a5a 100644
  	return 0;
  }
 diff --git a/bsd/sys/flame_wlan.h b/bsd/sys/flame_wlan.h
-index e69de29..6f48588 100644
---- a/bsd/sys/flame_wlan.h
+new file mode 100644
+index 0000000..6f48588
+--- /dev/null
 +++ b/bsd/sys/flame_wlan.h
 @@ -0,0 +1,73 @@
 +/*
