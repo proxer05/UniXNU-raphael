@@ -2767,7 +2767,7 @@ index 0000000..acb484a
 +}
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
-index 2d88a34..f05de5a 100644
+index 2d88a34..40e5ec1 100644
 --- a/bsd/dev/sweet_rpmh.c
 +++ b/bsd/dev/sweet_rpmh.c
 @@ -56,6 +56,7 @@ int sweet_rpmh_vreg_set(const char *res, unsigned mv, bool enable);
@@ -2790,7 +2790,7 @@ index 2d88a34..f05de5a 100644
  				return EINVAL;
  			}
  			*address = addr;
-@@ -444,4 +445,138 @@ out:
+@@ -444,4 +445,141 @@ out:
  	__atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
  	return error;
  }
@@ -2806,7 +2806,7 @@ index 2d88a34..f05de5a 100644
 +int
 +sweet_rpmh_write(const char *res, unsigned n, const uint32_t *offsets, const uint32_t *values)
 +{
-+	if (!res || n == 0 || n > rh_ncpt || n > 4) {
++	if (!res || n == 0 || n > 4) {
 +		return EINVAL;
 +	}
 +	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
@@ -2816,6 +2816,9 @@ index 2d88a34..f05de5a 100644
 +	uint32_t address = 0;
 +	if (!rh_poisoned) {
 +		error = rh_map();
++		if (!error && n > rh_ncpt) {
++			error = EINVAL;         /* rh_ncpt is only known after rh_map */
++		}
 +		if (!error) {
 +			error = rh_lookup(res, &address);
 +		}
