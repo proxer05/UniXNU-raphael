@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[4]
 PATCH = ROOT / 'xnu/patches-11215/0263-raphael-wifi-bridge.patch'
 BSD_FILES = ('flame_sta.c', 'flame_wlan.c', 'redwood_apple80211.c',
              'redwood_net.c', 'redwood_sta.c', 'sweet_pmem.c')
-IOKIT_FILES = ('MiniIONetworkStack.cpp', 'RedwoodWLAN.cpp')
+IOKIT_FILES = ('RedwoodWLAN.cpp',)
 HEADERS = ('flame_wlan.h', 'redwood_input.h', 'redwood_net.h', 'redwood_sta.h')
 
 
@@ -34,6 +34,7 @@ class KernelPatchTests(unittest.TestCase):
         expected.update('bsd/dev/' + name for name in BSD_FILES)
         expected.update('bsd/sys/' + name for name in HEADERS)
         expected.update('iokit/Kernel/arm/' + name for name in IOKIT_FILES)
+        expected.update(('iokit/Kernel/arm/SweetNetwork.cpp', 'iokit/Kernel/arm/SweetNetwork.h'))
         self.assertEqual(set(sections()), expected)
 
     def test_build_registration_complete(self):
@@ -69,6 +70,16 @@ class KernelPatchTests(unittest.TestCase):
         parts = sections()
         self.assertRegex(parts['bsd/dev/sweet_pmem.c'], r'uint32_t on = 0;')
         self.assertRegex(parts['bsd/dev/flame_wlan.c'], r'uint32_t on = 0;')
+
+    def test_shared_network_classes(self):
+        parts = sections()
+        wlan = '\n'.join(added(parts['iokit/Kernel/arm/RedwoodWLAN.cpp']))
+        self.assertIn('#include "SweetNetwork.h"', wlan)
+        self.assertNotRegex(wlan, r'class\s+IONetworkInterface\s*:')
+        self.assertNotIn('MiniIONetworkStack.cpp', parts)
+        stack = '\n'.join(added(parts['iokit/Kernel/arm/SweetNetwork.cpp']))
+        self.assertIn('MiniIONetworkStackStart(void)', stack)
+        self.assertIn('if (stack_published || platform == NULL)', stack)
 
     def test_root_credentials_and_hardware_gate(self):
         parts = sections()

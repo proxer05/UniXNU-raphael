@@ -5,8 +5,11 @@ Adapted from IOS-26-Hot commit d249939b9c36380afaee1a76cf167aeee8347475,
 patches 0094/0123 and selected Wi-Fi portions of 0146. Keep the donor
 identifiers so protocol interfaces remain traceable during the backport.
 
-Register six BSD sources and two IOKit sources without changing existing
+Register six BSD sources and the Wi-Fi IOKit service without changing existing
 SweetPlatformExpert registration, GPU surface layout, or IOKit startup.
+Reuse SweetNetwork.cpp's IONetworkInterface and IONetworkStack definitions;
+share their header with RedwoodWLAN and expose idempotent stack publication.
+Do not compile the donor's colliding MiniIONetworkStack definitions.
 Add startup hooks for /dev/pmem and /dev/wlan, both disabled by default.
 
 This is a compilation milestone, not a working or hardware-ready Wi-Fi port.
@@ -3024,132 +3027,12 @@ index 0000000..15b2ce1
 +#endif
 +
 +#endif
-diff --git a/iokit/Kernel/arm/MiniIONetworkStack.cpp b/iokit/Kernel/arm/MiniIONetworkStack.cpp
-new file mode 100644
-index 0000000..081fd35
---- /dev/null
-+++ b/iokit/Kernel/arm/MiniIONetworkStack.cpp
-@@ -0,0 +1,114 @@
-+/*
-+ * MiniIONetworkStack: a stand-in for IONetworkStack of Apple's IONetworkingFamily, as seen by
-+ * configd's interface namer.
-+ *
-+ * The real one gives the BSD names (en0, en1, ...) to the IONetworkInterface objects of the
-+ * drivers, when the interface namer asks. Here interfaces are made with the BSD interface KPI
-+ * (bsd/dev/redwood_net.c) and are born with their names, so there is never anything to name.
-+ * But the namer wants this object all the same: until it has opened it, it does not say in
-+ * configd's store that the registry has gone quiet (the key Plugin:InterfaceNamer, "*QUIET*"),
-+ * and gives up only after five minutes ("*TIMEOUT*"). SystemConfiguration's
-+ * SCNetworkInterfaceCopyAll() waits for one of the two, and with it whoever asks for the list of
-+ * interfaces: wifid as soon as it has a device, and behind wifid SpringBoard.
-+ *
-+ * So: the service, a user client that can be opened, and a refusal of the naming request.
-+ */
-+
-+#include <IOKit/IOLib.h>
-+#include <IOKit/IOKitKeys.h>
-+#include <IOKit/IOService.h>
-+#include <IOKit/IOUserClient.h>
-+#include <sys/systm.h>
-+#include <sys/proc.h>
-+
-+extern "C" void MiniIONetworkStackStart(void);
-+
-+class IONetworkStack : public IOService
-+{
-+	OSDeclareDefaultStructors(IONetworkStack);
-+
-+public:
-+	virtual bool start(IOService * provider) APPLE_KEXT_OVERRIDE;
-+};
-+
-+OSDefineMetaClassAndStructors(IONetworkStack, IOService);
-+
-+bool
-+IONetworkStack::start(IOService * provider)
-+{
-+	if (!IOService::start(provider)) {
-+		return false;
-+	}
-+	setProperty(kIOUserClientClassKey, "IONetworkStackUserClient");
-+	setName("IONetworkStack");
-+	registerService();
-+	return true;
-+}
-+
-+class IONetworkStackUserClient : public IOUserClient
-+{
-+	OSDeclareDefaultStructors(IONetworkStackUserClient);
-+
-+public:
-+	virtual bool start(IOService * provider) APPLE_KEXT_OVERRIDE;
-+	virtual IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
-+	virtual IOReturn setProperties(OSObject * properties) APPLE_KEXT_OVERRIDE;
-+};
-+
-+OSDefineMetaClassAndStructors(IONetworkStackUserClient, IOUserClient);
-+
-+bool
-+IONetworkStackUserClient::start(IOService * provider)
-+{
-+	char who[32] = "?";
-+
-+	if (!IOUserClient::start(provider)) {
-+		return false;
-+	}
-+	/* whether the registry is quiet at this moment is what the namer goes on to ask */
-+	proc_selfname(who, sizeof(who));
-+	IOLog("MiniIONetworkStack: opened by %s; the registry's busy state is %u\n", who,
-+	    (unsigned) IOService::getServiceRoot()->getBusyState());
-+	return true;
-+}
-+
-+IOReturn
-+IONetworkStackUserClient::clientClose(void)
-+{
-+	if (!isInactive()) {
-+		terminate();
-+	}
-+	return kIOReturnSuccess;
-+}
-+
-+/* "Name this interface" (a dictionary: IONetworkStackUserCommand, IOPathMatch, IOInterfaceUnit). */
-+IOReturn
-+IONetworkStackUserClient::setProperties(OSObject * properties)
-+{
-+	static unsigned said;
-+
-+	if (said++ < 4) {
-+		IOLog("MiniIONetworkStack: asked to name an interface: there are none of that kind\n");
-+	}
-+	return kIOReturnUnsupported;
-+}
-+
-+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
-+
-+void
-+MiniIONetworkStackStart(void)
-+{
-+	/* where the real one is: IOService:/IOResources/IONetworkStack */
-+	IOService * resources = IOService::getResourceService();
-+	IONetworkStack * stack = OSTypeAlloc(IONetworkStack);
-+
-+	if (resources == NULL || stack == NULL || !stack->init() || !stack->attach(resources)) {
-+		OSSafeReleaseNULL(stack);
-+		IOLog("MiniIONetworkStack: cannot create the service\n");
-+		return;
-+	}
-+	if (!stack->start(resources)) {
-+		stack->detach(resources);
-+	}
-+	stack->release();
-+}
 diff --git a/iokit/Kernel/arm/RedwoodWLAN.cpp b/iokit/Kernel/arm/RedwoodWLAN.cpp
 new file mode 100644
-index 0000000..89d8840
+index 0000000..51684f9
 --- /dev/null
 +++ b/iokit/Kernel/arm/RedwoodWLAN.cpp
-@@ -0,0 +1,137 @@
+@@ -0,0 +1,131 @@
 +/*
 + * RedwoodWLAN: the registry entries by which iOS finds the Wi-Fi interface.
 + *
@@ -3181,6 +3064,7 @@ index 0000000..89d8840
 +#include <IOKit/IOUserClient.h>
 +#include <libkern/c++/OSData.h>
 +#include <libkern/c++/OSNumber.h>
++#include "SweetNetwork.h"
 +
 +extern "C" void RedwoodWLANStart(const char * interface, const uint8_t * address);
 +
@@ -3190,13 +3074,6 @@ index 0000000..89d8840
 +};
 +
 +OSDefineMetaClassAndStructors(IO80211Controller, IOService);
-+
-+class IONetworkInterface : public IOService
-+{
-+	OSDeclareDefaultStructors(IONetworkInterface);
-+};
-+
-+OSDefineMetaClassAndStructors(IONetworkInterface, IOService);
 +
 +class RedwoodWLAN : public IONetworkInterface
 +{
@@ -3287,16 +3164,131 @@ index 0000000..89d8840
 +	}
 +	controller->release();
 +}
+diff --git a/iokit/Kernel/arm/SweetNetwork.cpp b/iokit/Kernel/arm/SweetNetwork.cpp
+index 3c97872..6cf08ee 100644
+--- a/iokit/Kernel/arm/SweetNetwork.cpp
++++ b/iokit/Kernel/arm/SweetNetwork.cpp
+@@ -43,6 +43,7 @@
+ #include <libkern/c++/OSData.h>
+ #include <libkern/c++/OSDictionary.h>
+ #include <libkern/c++/OSString.h>
++#include "SweetNetwork.h"
+ 
+ /*
+  * Common base: log which process asks for a user client on any of our
+@@ -50,13 +51,6 @@
+  * has kIOUserClientClassKey set so it succeeds; the others answer
+  * kIOReturnUnsupported, as an IOService without a user client does).
+  */
+-class SweetNetService : public IOService {
+-	OSDeclareDefaultStructors(SweetNetService);
+-public:
+-	IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type,
+-	    OSDictionary *properties, IOUserClient **handler) APPLE_KEXT_OVERRIDE;
+-	using IOService::newUserClient;
+-};
+ OSDefineMetaClassAndStructors(SweetNetService, IOService);
+ 
+ IOReturn
+@@ -74,9 +68,6 @@ SweetNetService::newUserClient(task_t owningTask, void *securityID, UInt32 type,
+ 	return ret;
+ }
+ 
+-class IONetworkInterface : public SweetNetService {
+-	OSDeclareDefaultStructors(IONetworkInterface);
+-};
+ OSDefineMetaClassAndStructors(IONetworkInterface, SweetNetService);
+ 
+ class IOEthernetInterface : public IONetworkInterface {
+@@ -179,6 +170,25 @@ sweet_net_set_overrides(IOService *intf, const char *ip, const char *mask,
+ 	OSSafeReleaseNULL(gw);
+ }
+ 
++/* Publish the shared stack once, whether USB or the Wi-Fi bridge asks first. */
++static bool stack_published;
++
++extern "C" void
++MiniIONetworkStackStart(void)
++{
++	IOService *platform = IOService::getPlatform();
++	if (stack_published || platform == NULL) {
++		return;
++	}
++	IONetworkStack *stack = OSTypeAlloc(IONetworkStack);
++	if (stack != NULL && stack->init()) {
++		stack->setProperty(kIOUserClientClassKey, "SweetNetworkStackUserClient");
++		stack_published = sweet_net_attach(stack, platform);
++	} else {
++		OSSafeReleaseNULL(stack);
++	}
++}
++
+ /*
+  * Publish bus -> controller -> interface for one BSD ifnet, plus the
+  * IONetworkStack (once). Called by sweet_usb.c after creating its ifnet.
+@@ -189,7 +199,6 @@ sweet_net_publish(const char *bsd_name, const char *prefix, unsigned unit,
+     const uint8_t *mac, const char *ip, const char *mask, const char *router,
+     const char *dns1, const char *dns2)
+ {
+-	static bool stack_published;
+ 	IOService *platform = IOService::getPlatform();
+ 
+ 	if (platform == NULL) {
+@@ -197,15 +206,7 @@ sweet_net_publish(const char *bsd_name, const char *prefix, unsigned unit,
+ 		return 0;
+ 	}
+ 
+-	if (!stack_published) {
+-		IONetworkStack *stack = OSTypeAlloc(IONetworkStack);
+-		if (stack != NULL && stack->init()) {
+-			stack->setProperty(kIOUserClientClassKey, "SweetNetworkStackUserClient");
+-			stack_published = sweet_net_attach(stack, platform);
+-		} else {
+-			OSSafeReleaseNULL(stack);
+-		}
+-	}
++	MiniIONetworkStackStart();
+ 
+ 	SweetNetworkBus *bus = OSTypeAlloc(SweetNetworkBus);
+ 	if (bus == NULL || !bus->init()) {
+diff --git a/iokit/Kernel/arm/SweetNetwork.h b/iokit/Kernel/arm/SweetNetwork.h
+new file mode 100644
+index 0000000..ea36ece
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetNetwork.h
+@@ -0,0 +1,23 @@
++/* Shared network registry classes; implemented once in SweetNetwork.cpp. */
++#ifndef SWEET_NETWORK_H
++#define SWEET_NETWORK_H
++
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <IOKit/IOService.h>
++#include <IOKit/IOUserClient.h>
++
++class SweetNetService : public IOService {
++	OSDeclareDefaultStructors(SweetNetService);
++public:
++	IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type,
++	    OSDictionary *properties, IOUserClient **handler) APPLE_KEXT_OVERRIDE;
++	using IOService::newUserClient;
++};
++
++class IONetworkInterface : public SweetNetService {
++	OSDeclareDefaultStructors(IONetworkInterface);
++};
++
++extern "C" void MiniIONetworkStackStart(void);
++#endif
++#endif
 diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
-index b0409b5..d275cd7 100644
+index b0409b5..fb025f0 100644
 --- a/iokit/conf/files.arm64
 +++ b/iokit/conf/files.arm64
-@@ -10,6 +10,8 @@ iokit/Kernel/arm/AppleARMSMP.cpp    					optional iokitcpp
+@@ -10,6 +10,7 @@ iokit/Kernel/arm/AppleARMSMP.cpp    					optional iokitcpp
  ./Exclaves/IOService.tightbeam.c		optional iokitcpp config_exclaves
  # SWEET device-tree platform (empty translation unit on other boards)
  iokit/Kernel/arm/SweetPlatformExpert.cpp                         optional iokitcpp
 +iokit/Kernel/arm/RedwoodWLAN.cpp                                 optional iokitcpp
-+iokit/Kernel/arm/MiniIONetworkStack.cpp                          optional iokitcpp
  
  iokit/Kernel/arm/SweetCPU.cpp                                    optional iokitcpp
  iokit/Kernel/arm/SweetBusy.cpp                                   optional iokitcpp

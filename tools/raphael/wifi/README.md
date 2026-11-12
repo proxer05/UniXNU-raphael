@@ -12,9 +12,10 @@ See `PROVENANCE.md` for local changes and upstream credits.
 
 - Thirteen userspace protocol translation units compile in the Linux test harness.
   Its tests check the message structures and host crypto shims, not radio behavior.
-- Patch `0263-raphael-wifi-bridge.patch` now lists all six BSD and two IOKit sources.
-  Both Makefiles generate using XNU's actual config parser. Full compilation and
-  linking require the macOS CI result; earlier syntax checks were not sufficient.
+- Patch `0263-raphael-wifi-bridge.patch` lists all six BSD sources and RedwoodWLAN.
+  It reuses the existing SweetNetwork interface/stack classes rather than compiling
+  colliding donor class definitions. Both Makefiles generate using XNU's actual
+  config parser. Full compilation/linking still requires a successful macOS CI result.
 - `/dev/pmem` and `/dev/wlan` default off. Driver opens enforce root credentials.
   Physical-memory transfers and SMC calls return `EPERM` pending a verified policy.
 - iOS 18 association/scan buffer ABI derivation is incomplete. `ABI-NOTES.md` is

@@ -13,7 +13,7 @@ against the phone's LIVE device tree** (read from `/proc/device-tree/reserved-me
 | `APCS_IPC` | 0x17c0000c | `syscon@17c0000c` | ✅ keep |
 | `MPSS_PA` | 0x8dc00000 | **0x8e000000 / 0x9600000** (live `modem_region`) | ❌ replace |
 | WLAN MSA region | (pixel: fixed) | **0x8bc00000 / 0x180000** (live `pil_wlan_fw_region`) | ❌ replace |
-| `POOL_PA` | 0xE0000000/16M | see below — recommended inside `removed_regions` | ⚠️ decide |
+| `POOL_PA` | 0xE0000000/16M | no independently reserved allocation established | unresolved; do not enable |
 
 ## LIVE reserved-memory map (all no-map; low bank ends 0x100000000)
 
