@@ -1,16 +1,24 @@
 From: Raphael Wi-Fi port <port@local>
 Subject: [PATCH] 0263: WCN3990 station bridge for xnu-11215 (hardware-verified)
 
-Adapted from IOS-26-Hot commit d249939, patches 0094/0123/0146.
+Adapted from IOS-26-Hot commit d249939, patches 0094/0102/0123/0139/0146.
 Board constants verified against the phone's live device tree:
 MPSS 0x8e000000/0x9600000, MSA 0x8bc00000/0x180000, WLAN 0x18800000,
 SMMU 0x15000000, APCS 0x17c0000c. All three gates default OFF.
 
+Features:
+- /dev/pmem (root-only 0600, sweetpmem=1): physical read/write, contiguous
+  DMA allocation, RPMh votes, PAS boot via SMC, Raphael MPSS write-combining
+- /dev/wlan + en0 station (sweetwifid=1): kernel-side Wi-Fi station
+- SweetNetwork shared classes: IONetworkInterface/IONetworkStack reused
+- SweetNetwork.h shared header eliminates donor duplicate class definitions
+- sweet_rpmh.c: ARC resource support and generic sweet_rpmh_write()
+
 diff --git a/bsd/conf/files b/bsd/conf/files
-index ea5a65a..c786900 100644
+index ea5a65a..fe6fac5 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -113,6 +113,12 @@ bsd/dev/sweet_rpmh.c			standard
+@@ -113,6 +113,13 @@ bsd/dev/sweet_rpmh.c			standard
  bsd/dev/sweet_spmi.c			standard
  bsd/dev/sweet_reboot.c			standard
  bsd/dev/sweet_usb.c			standard
@@ -20,6 +28,7 @@ index ea5a65a..c786900 100644
 +bsd/dev/flame_sta.c		standard
 +bsd/dev/flame_wlan.c		standard
 +bsd/dev/sweet_pmem.c		standard
++
  bsd/dev/sweet_cpufreq.c			standard
  bsd/dev/sweet_charger.c			standard
  bsd/dev/sweet_smmu.c			standard
@@ -280,10 +289,10 @@ index 0000000..72b205c
 +}
 diff --git a/bsd/dev/flame_wlan.c b/bsd/dev/flame_wlan.c
 new file mode 100644
-index 0000000..0ae2b3d
+index 0000000..dd8ed3b
 --- /dev/null
 +++ b/bsd/dev/flame_wlan.c
-@@ -0,0 +1,478 @@
+@@ -0,0 +1,477 @@
 +/*
 + * flame: the WCN3990 radio for the kernel's Wi-Fi station. bsd/dev/flame_sta.c (ios-topaz 0900's topaz_sta.c)
 + * puts en0 and wifid's Apple80211 requests (bsd/dev/redwood_*.c) on this file's flame_wlan_* C API, the one
@@ -293,9 +302,6 @@ index 0000000..0ae2b3d
 + * The station's requests (scan, join, leave) are queued for wland and each waits for its answer; frames en0
 + * sends are queued too (dropped when the queue is full). What wland writes back wakes the waiter, or goes to
 + * en0 (received frames) and the link hook. When wland closes the device the link is down and waiters fail.
-+ */
-+/*
-+ * raphael Wi-Fi port: /dev/wlan from IOS-26-Hot (MIT), defaults OFF.
 + */
 +#if defined(ARM64_BOARD_CONFIG_SWEET)
 +#include <sys/param.h>
@@ -542,7 +548,9 @@ index 0000000..0ae2b3d
 +static int
 +fw_open(__unused dev_t dev, __unused int flags, __unused int devtype, __unused proc_t p)
 +{
-+	if (!kauth_cred_issuser(kauth_cred_get())) return EPERM;
++	if (!kauth_cred_issuser(kauth_cred_get())) {
++		return EPERM;
++	}
 +	lck_mtx_lock(&fw_lock);
 +	int rc = fw_opened ? EBUSY : 0;
 +	if (rc == 0) {
@@ -2336,10 +2344,10 @@ index 0000000..4c73786
 +}
 diff --git a/bsd/dev/sweet_pmem.c b/bsd/dev/sweet_pmem.c
 new file mode 100644
-index 0000000..51b8cdd
+index 0000000..acb484a
 --- /dev/null
 +++ b/bsd/dev/sweet_pmem.c
-@@ -0,0 +1,355 @@
+@@ -0,0 +1,408 @@
 +/*
 + * /dev/pmem: physical memory for userland hardware experiments (the GPU
 + * bring-up in work/userland/gpu runs on it over SSH, no reboot per try).
@@ -2358,6 +2366,8 @@ index 0000000..51b8cdd
 + *   ioctl PMEM_FREE    {pa}
 + *   ioctl PMEM_SMC     x0..x7 in, x0..x3 out (SMCCC; e.g. SCM PAS calls)
 + *   ioctl PMEM_LIST    allocation table, for tools that lost their state
++ *   ioctl PMEM_RPMH    one RPMh active vote: resource name, 1-4 (offset, value) commands
++ *                      (ARC levels, VRM rails; bsd/dev/sweet_rpmh.c)
 + *
 + * Userland side: work/userland/gpu/pmem.h (same structs and numbers).
 + */
@@ -2380,7 +2390,7 @@ index 0000000..51b8cdd
 +#include <arm/caches_internal.h>
 +#include <vm/pmap.h>
 +#include <vm/vm_kern.h>
-+#include <vm/vm_kern_xnu.h>       /* xnu-11215: kmem_alloc_contig */
++#include <vm/vm_kern_xnu.h>       /* xnu-11215: kmem_alloc_contig lives here */
 +#include <pexpert/pexpert.h>
 +#include <libkern/libkern.h>
 +
@@ -2413,6 +2423,14 @@ index 0000000..51b8cdd
 +#define PMEM_FREE       _IOW('P', 2, uint64_t)
 +#define PMEM_SMC        _IOWR('P', 3, struct pmem_smc)
 +#define PMEM_LIST       _IOR('P', 4, struct pmem_list)
++struct pmem_rpmh {
++	char res[16];           /* cmd-db name, e.g. "mss.lvl", "ldoa1" */
++	uint32_t n;             /* 1..4 commands */
++	uint32_t offset[4];     /* from the resource address */
++	uint32_t value[4];
++};
++#define PMEM_RPMH       _IOW('P', 5, struct pmem_rpmh)
++extern int sweet_rpmh_write(const char *res, unsigned n, const uint32_t *offsets, const uint32_t *values);
 +
 +#define PMEM_MAPS       16              /* 2 MB device windows, round robin */
 +#define PMEM_WIN        0x200000ULL
@@ -2437,6 +2455,21 @@ index 0000000..51b8cdd
 + * from the small io_submap (a 2 MB one panicked "kmem_alloc failed"), so
 + * windows use ml_io_map_unmappable: kernel_map, freed by ml_io_unmap.
 + */
++/*
++ * Raphael SM8150 MPSS carve-out (0x8e000000..0x97600000, 150 MiB, 2 MiB aligned):
++ * lies inside /chosen dram-base..dram-size, so VM_WIMG_WCOMB maps it as
++ * Normal Non-Cacheable Write-Combining instead of strongly-ordered Device
++ * memory, dropping wland's 150 MiB MPSS load from ~90 s to < 0.1 s.
++ */
++#define PMEM_MPSS_PA    0x8e000000ULL
++#define PMEM_MPSS_END   0x97600000ULL
++
++static inline bool
++pm_is_wcomb(uint64_t pa)
++{
++	return pa >= PMEM_MPSS_PA && pa < PMEM_MPSS_END;
++}
++
 +static volatile uint32_t *
 +pm_io(uint64_t pa)
 +{
@@ -2450,7 +2483,8 @@ index 0000000..51b8cdd
 +	if (pm_map[i].va) {
 +		ml_io_unmap(pm_map[i].va, PMEM_WIN);
 +	}
-+	pm_map[i].va = ml_io_map_unmappable((vm_offset_t)win, PMEM_WIN, VM_WIMG_IO);
++	unsigned int wimg = pm_is_wcomb(win) ? VM_WIMG_WCOMB : VM_WIMG_IO;
++	pm_map[i].va = ml_io_map_unmappable((vm_offset_t)win, PMEM_WIN, wimg);
 +	pm_map[i].win = win;
 +	return pm_map[i].va ? (volatile uint32_t *)(pm_map[i].va + (pa - win)) : NULL;
 +}
@@ -2479,6 +2513,20 @@ index 0000000..51b8cdd
 +		if (r == NULL) {
 +			err = ENOMEM;
 +			break;
++		}
++		if (pm_is_wcomb(pa)) {
++			if (write) {
++				err = uiomove((caddr_t)pm_bounce, (int)n, uio);
++				if (!err) {
++					bcopy(pm_bounce, (void *)(uintptr_t)r, n);
++					__asm__ volatile ("dsb sy" ::: "memory");
++				}
++			} else {
++				bcopy((const void *)(uintptr_t)r, pm_bounce, n);
++				__asm__ volatile ("dmb oshld" ::: "memory");
++				err = uiomove((caddr_t)pm_bounce, (int)n, uio);
++			}
++			continue;
 +		}
 +		if (write) {
 +			err = uiomove((caddr_t)pm_bounce, (int)n, uio);
@@ -2582,6 +2630,9 @@ index 0000000..51b8cdd
 +static int
 +pm_do_alloc(struct pmem_alloc *a)
 +{
++	if (a->size == 0 || a->size > (32ull << 20) || a->align > (32ull << 20)) {
++		return EINVAL;
++	}
 +	vm_size_t size = round_page(a->size);
 +	uint64_t align = a->align > PAGE_SIZE ? a->align : PAGE_SIZE;
 +	if (size == 0 || (align & (align - 1))) {
@@ -2619,7 +2670,9 @@ index 0000000..51b8cdd
 +static int
 +pm_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag, __unused struct proc *p)
 +{
-+	if (!kauth_cred_issuser(kauth_cred_get())) return EPERM;
++	if (!kauth_cred_issuser(kauth_cred_get())) {
++		return EPERM;
++	}
 +	int err = 0;
 +	lck_mtx_lock(&sweet_pmem_lock);
 +	switch (cmd) {
@@ -2642,6 +2695,14 @@ index 0000000..51b8cdd
 +	case PMEM_SMC:
 +		pm_smc((struct pmem_smc *)data);
 +		break;
++	case PMEM_RPMH: {
++		struct pmem_rpmh *r = (struct pmem_rpmh *)data;
++		r->res[sizeof(r->res) - 1] = 0;
++		lck_mtx_unlock(&sweet_pmem_lock);       /* waits up to 100 ms; not under our lock */
++		err = sweet_rpmh_write(r->res, r->n, r->offset, r->value);
++		printf("SWEET PMEM: rpmh %s %u cmds (%#x=%u ...) -> %d\n", r->res, r->n, r->offset[0], r->value[0], err);
++		return err;
++	}
 +	case PMEM_LIST: {
 +		struct pmem_list *l = (struct pmem_list *)data;
 +		bzero(l, sizeof(*l));
@@ -2695,8 +2756,123 @@ index 0000000..51b8cdd
 +	printf("SWEET PMEM: /dev/pmem ready (major %d)\n", major);
 +}
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
+index 2d88a34..aab47d6 100644
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -444,4 +444,110 @@ out:
+ 	__atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
+ 	return error;
+ }
++/*
++ * Generic RPMh write for /dev/pmem's PMEM_RPMH (userland bring-up of the modem
++ * and WLAN: ARC levels of cx/mss, WLAN VRM rails, BCM bus votes). No policy:
++ * a debugging path gated by the root-only device node and sweetpmem=1.
++ */
++int
++sweet_rpmh_write(const char *res, unsigned n, const uint32_t *offsets, const uint32_t *values)
++{
++	if (!res || n == 0 || n > 4) {
++		return EINVAL;
++	}
++	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
++		return EBUSY;
++	}
++	int error = EIO;
++	uint32_t address = 0;
++	if (!rh_poisoned) {
++		error = rh_map();
++		if (!error) {
++			error = rh_lookup(res, &address);
++		}
++		if (!error) {
++			/* reuse rh_send's TCS slot logic but with generic commands */
++			int chosen = -1;
++			for (unsigned t = 0; t < RH_ACTIVE_N; ++t) {
++				uint32_t b = t * RH_TCS_STRIDE;
++				uint32_t enabled = rh_read(rh_tcs, b + RH_ENABLE);
++				if (enabled & ~((1u << rh_ncpt) - 1u)) {
++					continue;
++				}
++				bool busy = false;
++				for (unsigned c = 0; c < rh_ncpt; ++c) {
++					if ((enabled & (1u << c)) &&
++					    (rh_read(rh_tcs, b + RH_ADDR + c * RH_CMD_STRIDE) & ~15u) == address) {
++						busy = true;
++						break;
++					}
++				}
++				if (busy) {
++					continue;
++				}
++				if (rh_free(t)) {
++					chosen = (int)t;
++					break;
++				}
++			}
++			if (chosen < 0) {
++				error = EBUSY;
++			} else {
++				unsigned t = (unsigned)chosen;
++				uint32_t b = t * RH_TCS_STRIDE, bit = 1u << t;
++				uint32_t irq_en = rh_read(rh_tcs, RH_IRQ_EN);
++				if (irq_en == 0xffffffffu || !rh_free(t)) {
++					error = EBUSY;
++				} else {
++					if (!rh_sync(RH_IRQ_EN, irq_en & ~bit)) {
++						rh_poisoned = true;
++						error = EIO;
++					} else {
++						rh_poisoned = true;
++						uint32_t cmdmask = (1u << n) - 1u;
++						bool ok = true;
++						for (unsigned c = 0; ok && c < n; ++c) {
++							uint32_t cmd = b + c * RH_CMD_STRIDE;
++							ok = rh_sync(cmd + RH_MSGID, RH_WRITE_ACK) &&
++							    rh_sync(cmd + RH_ADDR, address + offsets[c]) &&
++							    rh_sync(cmd + RH_DATA, values[c]);
++						}
++						if (ok) {
++							ok = rh_sync(b + RH_WAIT, cmdmask) &&
++							    rh_sync(b + RH_ENABLE, cmdmask) &&
++							    rh_sync(b + RH_CONTROL, 0) &&
++							    rh_sync(b + RH_CONTROL, RH_AMC_EN);
++							rh_write(rh_tcs, b + RH_CONTROL, RH_AMC_EN | RH_TRIGGER);
++							/* wait for completion */
++							if (ok) {
++								for (unsigned us = 0; us < RH_TIMEOUT_US; ++us) {
++									uint32_t irq = rh_read(rh_tcs, RH_IRQ_STATUS);
++									uint32_t idle = rh_read(rh_tcs, b + RH_STATUS);
++									bool complete = true;
++									for (unsigned c = 0; c < n; ++c) {
++										uint32_t st = rh_read(rh_tcs, b + RH_CMD_STATUS + c * RH_CMD_STRIDE);
++										complete &= st != 0xffffffffu &&
++										    (st & (RH_ISSUED | RH_COMPLETE)) == (RH_ISSUED | RH_COMPLETE);
++									}
++									bool progress = idle == 0 || !complete;
++									if (idle && idle != 0xffffffffu && irq != 0xffffffffu &&
++									    ((irq & bit) || progress) && complete) {
++										break;
++									}
++									delay(1);
++								}
++							}
++							error = ok ? 0 : EIO;
++						} else {
++							error = EIO;
++						}
++					}
++				}
++			}
++		}
++	}
++	__atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
++	return error;
++}
++
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index 27caa07..00925c1 100644
+index 27caa07..b052a5a 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -75,6 +75,8 @@ extern void sweet_usb_probe(void);
@@ -2704,7 +2880,7 @@ index 27caa07..00925c1 100644
  extern void sweet_charger_start(void);
  extern void sweet_a630_probe(void);
 +extern void sweet_pmem_init(void);
-+extern void flame_wlan_init();
++extern void flame_wlan_init(void);
  
  #define REG_CAP         0x00
  #define REG_IS          0x20
@@ -2712,8 +2888,8 @@ index 27caa07..00925c1 100644
  	sweet_touch_init();
  	sweet_usb_probe();
  	sweet_a630_probe();	/* sweetgpu=N, beryllium only, off by default */
-+	sweet_pmem_init();
-+	flame_wlan_init();
++	sweet_pmem_init();       /* /dev/pmem (sweetpmem=1): bsd/dev/sweet_pmem.c */
++	flame_wlan_init();       /* /dev/wlan + en0 (sweetwifid=1): bsd/dev/flame_wlan.c */
  	beryllium_wlan_init();      /* boot-arg sweetwlan=N, off by default */
  	return 0;
  }
@@ -3139,29 +3315,51 @@ index 0000000..51684f9
 +	controller->release();
 +}
 diff --git a/iokit/Kernel/arm/SweetNetwork.cpp b/iokit/Kernel/arm/SweetNetwork.cpp
-index 3c97872..d077997 100644
+index 3c97872..6cf08ee 100644
 --- a/iokit/Kernel/arm/SweetNetwork.cpp
 +++ b/iokit/Kernel/arm/SweetNetwork.cpp
-@@ -43,6 +43,8 @@
+@@ -43,6 +43,7 @@
  #include <libkern/c++/OSData.h>
  #include <libkern/c++/OSDictionary.h>
  #include <libkern/c++/OSString.h>
 +#include "SweetNetwork.h"
-+
  
  /*
   * Common base: log which process asks for a user client on any of our
-@@ -179,6 +181,26 @@ sweet_net_set_overrides(IOService *intf, const char *ip, const char *mask,
+@@ -50,13 +51,6 @@
+  * has kIOUserClientClassKey set so it succeeds; the others answer
+  * kIOReturnUnsupported, as an IOService without a user client does).
+  */
+-class SweetNetService : public IOService {
+-	OSDeclareDefaultStructors(SweetNetService);
+-public:
+-	IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type,
+-	    OSDictionary *properties, IOUserClient **handler) APPLE_KEXT_OVERRIDE;
+-	using IOService::newUserClient;
+-};
+ OSDefineMetaClassAndStructors(SweetNetService, IOService);
+ 
+ IOReturn
+@@ -74,9 +68,6 @@ SweetNetService::newUserClient(task_t owningTask, void *securityID, UInt32 type,
+ 	return ret;
+ }
+ 
+-class IONetworkInterface : public SweetNetService {
+-	OSDeclareDefaultStructors(IONetworkInterface);
+-};
+ OSDefineMetaClassAndStructors(IONetworkInterface, SweetNetService);
+ 
+ class IOEthernetInterface : public IONetworkInterface {
+@@ -179,6 +170,25 @@ sweet_net_set_overrides(IOService *intf, const char *ip, const char *mask,
  	OSSafeReleaseNULL(gw);
  }
  
-+/*
-+ * Publish the shared IONetworkStack once, whether USB or the Wi-Fi bridge asks first.
-+ */
-+void
++/* Publish the shared stack once, whether USB or the Wi-Fi bridge asks first. */
++static bool stack_published;
++
++extern "C" void
 +MiniIONetworkStackStart(void)
 +{
-+	static bool stack_published;
 +	IOService *platform = IOService::getPlatform();
 +	if (stack_published || platform == NULL) {
 +		return;
@@ -3178,6 +3376,31 @@ index 3c97872..d077997 100644
  /*
   * Publish bus -> controller -> interface for one BSD ifnet, plus the
   * IONetworkStack (once). Called by sweet_usb.c after creating its ifnet.
+@@ -189,7 +199,6 @@ sweet_net_publish(const char *bsd_name, const char *prefix, unsigned unit,
+     const uint8_t *mac, const char *ip, const char *mask, const char *router,
+     const char *dns1, const char *dns2)
+ {
+-	static bool stack_published;
+ 	IOService *platform = IOService::getPlatform();
+ 
+ 	if (platform == NULL) {
+@@ -197,15 +206,7 @@ sweet_net_publish(const char *bsd_name, const char *prefix, unsigned unit,
+ 		return 0;
+ 	}
+ 
+-	if (!stack_published) {
+-		IONetworkStack *stack = OSTypeAlloc(IONetworkStack);
+-		if (stack != NULL && stack->init()) {
+-			stack->setProperty(kIOUserClientClassKey, "SweetNetworkStackUserClient");
+-			stack_published = sweet_net_attach(stack, platform);
+-		} else {
+-			OSSafeReleaseNULL(stack);
+-		}
+-	}
++	MiniIONetworkStackStart();
+ 
+ 	SweetNetworkBus *bus = OSTypeAlloc(SweetNetworkBus);
+ 	if (bus == NULL || !bus->init()) {
 diff --git a/iokit/Kernel/arm/SweetNetwork.h b/iokit/Kernel/arm/SweetNetwork.h
 new file mode 100644
 index 0000000..ea36ece
