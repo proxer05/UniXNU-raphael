@@ -24,7 +24,7 @@ diff --git a/bsd/conf/files b/bsd/conf/files
  bsd/dev/sweet_smmu.c			standard
 
 diff --git a/bsd/dev/flame_sta.c b/bsd/dev/flame_sta.c
---- /dev/null	2026-11-12 09:30:40.719881381 +0100
+--- a/bsd/dev/flame_sta.c	2026-11-12 19:09:34.982333551 +0100
 +++ b/bsd/dev/flame_sta.c	2026-11-12 18:15:28.093733324 +0100
 @@ -0,0 +1,249 @@
 +/*
@@ -278,7 +278,7 @@ diff --git a/bsd/dev/flame_sta.c b/bsd/dev/flame_sta.c
 +}
 
 diff --git a/bsd/dev/flame_wlan.c b/bsd/dev/flame_wlan.c
---- /dev/null	2026-11-12 09:30:40.719881381 +0100
+--- a/bsd/dev/flame_wlan.c	2026-11-12 19:09:34.985666840 +0100
 +++ b/bsd/dev/flame_wlan.c	2026-11-12 18:15:56.756671625 +0100
 @@ -0,0 +1,478 @@
 +/*
@@ -761,7 +761,7 @@ diff --git a/bsd/dev/flame_wlan.c b/bsd/dev/flame_wlan.c
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 
 diff --git a/bsd/dev/redwood_apple80211.c b/bsd/dev/redwood_apple80211.c
---- /dev/null	2026-11-12 09:30:40.719881381 +0100
+--- a/bsd/dev/redwood_apple80211.c	2026-11-12 19:09:34.985666840 +0100
 +++ b/bsd/dev/redwood_apple80211.c	2026-11-12 18:15:28.127066197 +0100
 @@ -0,0 +1,803 @@
 +/*
@@ -1569,7 +1569,7 @@ diff --git a/bsd/dev/redwood_apple80211.c b/bsd/dev/redwood_apple80211.c
 +}
 
 diff --git a/bsd/dev/redwood_net.c b/bsd/dev/redwood_net.c
---- /dev/null	2026-11-12 09:30:40.719881381 +0100
+--- a/bsd/dev/redwood_net.c	2026-11-12 19:09:34.989000129 +0100
 +++ b/bsd/dev/redwood_net.c	2026-11-12 18:15:28.143732635 +0100
 @@ -0,0 +1,376 @@
 +/*
@@ -1950,7 +1950,7 @@ diff --git a/bsd/dev/redwood_net.c b/bsd/dev/redwood_net.c
 +}
 
 diff --git a/bsd/dev/redwood_sta.c b/bsd/dev/redwood_sta.c
---- /dev/null	2026-11-12 09:30:40.719881381 +0100
+--- a/bsd/dev/redwood_sta.c	2026-11-12 19:09:34.989000129 +0100
 +++ b/bsd/dev/redwood_sta.c	2026-11-12 18:15:28.150399210 +0100
 @@ -0,0 +1,375 @@
 +/*
@@ -2330,7 +2330,7 @@ diff --git a/bsd/dev/redwood_sta.c b/bsd/dev/redwood_sta.c
 +}
 
 diff --git a/bsd/dev/sweet_pmem.c b/bsd/dev/sweet_pmem.c
---- /dev/null	2026-11-12 09:30:40.719881381 +0100
+--- a/bsd/dev/sweet_pmem.c	2026-11-12 19:09:34.989000129 +0100
 +++ b/bsd/dev/sweet_pmem.c	2026-11-12 18:15:56.756671625 +0100
 @@ -0,0 +1,355 @@
 +/*
@@ -2712,7 +2712,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
  }
 
 diff --git a/bsd/sys/flame_wlan.h b/bsd/sys/flame_wlan.h
---- /dev/null	2026-11-12 09:30:40.719881381 +0100
+--- a/bsd/sys/flame_wlan.h	2026-11-12 19:09:34.992333418 +0100
 +++ b/bsd/sys/flame_wlan.h	2026-11-12 18:15:28.157065785 +0100
 @@ -0,0 +1,69 @@
 +/*
@@ -2786,7 +2786,7 @@ diff --git a/bsd/sys/flame_wlan.h b/bsd/sys/flame_wlan.h
 +#endif
 
 diff --git a/bsd/sys/redwood_input.h b/bsd/sys/redwood_input.h
---- /dev/null	2026-11-12 09:30:40.719881381 +0100
+--- a/bsd/sys/redwood_input.h	2026-11-12 19:09:34.995666707 +0100
 +++ b/bsd/sys/redwood_input.h	2026-11-12 18:15:28.160399072 +0100
 @@ -0,0 +1,5 @@
 +/* topaz: the one thing the station files take from redwood_input.h */
@@ -2796,7 +2796,7 @@ diff --git a/bsd/sys/redwood_input.h b/bsd/sys/redwood_input.h
 +#endif
 
 diff --git a/bsd/sys/redwood_net.h b/bsd/sys/redwood_net.h
---- /dev/null	2026-11-12 09:30:40.719881381 +0100
+--- a/bsd/sys/redwood_net.h	2026-11-12 19:09:34.995666707 +0100
 +++ b/bsd/sys/redwood_net.h	2026-11-12 18:15:28.163732359 +0100
 @@ -0,0 +1,63 @@
 +/*
@@ -2864,7 +2864,7 @@ diff --git a/bsd/sys/redwood_net.h b/bsd/sys/redwood_net.h
 +#endif /* _SYS_REDWOOD_NET_H_ */
 
 diff --git a/bsd/sys/redwood_sta.h b/bsd/sys/redwood_sta.h
---- /dev/null	2026-11-12 09:30:40.719881381 +0100
+--- a/bsd/sys/redwood_sta.h	2026-11-12 19:09:34.995666707 +0100
 +++ b/bsd/sys/redwood_sta.h	2026-11-12 18:15:28.163732359 +0100
 @@ -0,0 +1,123 @@
 +/*
@@ -2992,7 +2992,7 @@ diff --git a/bsd/sys/redwood_sta.h b/bsd/sys/redwood_sta.h
 +#endif
 
 diff --git a/iokit/Kernel/arm/RedwoodWLAN.cpp b/iokit/Kernel/arm/RedwoodWLAN.cpp
---- /dev/null	2026-11-12 09:30:40.719881381 +0100
+--- a/iokit/Kernel/arm/RedwoodWLAN.cpp	2026-11-12 19:09:34.998999996 +0100
 +++ b/iokit/Kernel/arm/RedwoodWLAN.cpp	2026-11-12 18:59:23.830407130 +0100
 @@ -0,0 +1,131 @@
 +/*
@@ -3168,7 +3168,7 @@ diff --git a/iokit/Kernel/arm/SweetNetwork.cpp b/iokit/Kernel/arm/SweetNetwork.c
   * Returns 1 when the interface object was published, else 0.
 
 diff --git a/iokit/Kernel/arm/SweetNetwork.h b/iokit/Kernel/arm/SweetNetwork.h
---- /dev/null	2026-11-12 09:30:40.719881381 +0100
+--- a/iokit/Kernel/arm/SweetNetwork.h	2026-11-12 19:09:35.002333285 +0100
 +++ b/iokit/Kernel/arm/SweetNetwork.h	2026-11-12 18:59:23.830407130 +0100
 @@ -0,0 +1,23 @@
 +/* Shared network registry classes; implemented once in SweetNetwork.cpp. */
