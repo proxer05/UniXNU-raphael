@@ -851,10 +851,10 @@ index 0000000..3a4eafa
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/redwood_apple80211.c b/bsd/dev/redwood_apple80211.c
 new file mode 100644
-index 0000000..88cb5c9
+index 0000000..8b3726a
 --- /dev/null
 +++ b/bsd/dev/redwood_apple80211.c
-@@ -0,0 +1,803 @@
+@@ -0,0 +1,809 @@
 +/*
 + * Darwin-on-redwood: Apple80211, answered in the kernel.
 + *
@@ -971,7 +971,11 @@ index 0000000..88cb5c9
 +	uint8_t unknown_3[3600];
 +} __attribute__((packed));
 +
-+/* SCAN_REQ (10): 5456 bytes */
++/* SCAN_REQ (10): 5456 bytes on iOS 16.5..26; 5528 (0x1598) on iOS 18.7.8: the same
++ * fields at the same offsets, and the tail after short_ssid grew from 4 to 76 bytes
++ * (a scan UUID string at 0x154c via uuid_unparse, a u64 option at 0x1590; builder
++ * IO80211 0x210401f08, buffer size 0x1598 at 0x210401cf8/0x210409a14). Nothing in
++ * the tail is read here. */
 +struct apple80211_scan_request {
 +	uint32_t version, bss_type;
 +	uint8_t bssid[6], unused_0[2];
@@ -987,7 +991,8 @@ index 0000000..88cb5c9
 +	uint32_t unused_2;
 +	uint32_t name_count;                    /* networks asked for by name, each in 56 bytes */
 +	uint8_t names[10][56];
-+	uint32_t short_ssid, unused_3;
++	uint32_t short_ssid;
++	uint8_t ios18_tail[76];                 /* the UUID string and options iOS 18 appends; unread */
 +};
 +
 +/* SCAN_RESULT (11) and CURRENT_NETWORK (103): 1164 bytes */
@@ -1052,9 +1057,10 @@ index 0000000..88cb5c9
 +_Static_assert(sizeof(struct apple80211_channels) == 4824, "the channel list as iOS 16.5 has it");
 +_Static_assert(sizeof(struct apple80211_channels_info) == 10016 && offsetof(struct apple80211_channels_info, number) == 0x32e &&
 +    offsetof(struct apple80211_channels_info, flags) == 0x12d0, "the channels' description as iOS 16.5 has it");
-+_Static_assert(sizeof(struct apple80211_scan_request) == 5456 && offsetof(struct apple80211_scan_request, channels) == 0x48 &&
-+    offsetof(struct apple80211_scan_request, flags) == 0x1308 && offsetof(struct apple80211_scan_request, names) == 0x1318,
-+    "the scan request as iOS 16.5 has it");
++_Static_assert(sizeof(struct apple80211_scan_request) == 0x1598 && offsetof(struct apple80211_scan_request, channels) == 0x48 &&
++    offsetof(struct apple80211_scan_request, flags) == 0x1308 && offsetof(struct apple80211_scan_request, names) == 0x1318 &&
++    offsetof(struct apple80211_scan_request, short_ssid) == 0x1548,
++    "the scan request as iOS 18.7.8 builds it (fields as 16.5, tail grown)");
 +_Static_assert(sizeof(struct apple80211_scan_result) == 1164 && offsetof(struct apple80211_scan_result, ssid_length) == 0x60 &&
 +    offsetof(struct apple80211_scan_result, age_ms) == 0x84 && offsetof(struct apple80211_scan_result, elements) == 0x8c,
 +    "a scan's result as iOS 16.5 has it");
