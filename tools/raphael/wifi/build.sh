@@ -11,7 +11,7 @@ OUT=build
 INC=-I$OUT/darwin-include
 CFLAGS="-target arm64-apple-ios18.0 -O2 -Wall -Wextra -Wno-unused-parameter -fno-stack-protector -nostdinc $INC"
 mkdir -p "$OUT/wland"
-SRCS="wland smem pmem glink link qrtr_mux qmi rmtfs pdmapper servreg tftp scm wlfw radio ipnet bridge"
+SRCS="wland smem pmem glink link qrtr_mux qmi rmtfs pdmapper servreg tftp scm wlfw radio radio_dma ipnet bridge"
 for f in $SRCS; do
 	$CC $CFLAGS -c "src/$f.c" -o "$OUT/wland/$f.o"
 done

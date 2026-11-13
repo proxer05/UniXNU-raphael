@@ -32,6 +32,14 @@ main(void)
 	      "fw_bss field order");
 	check(FW_FRAME_MAX == 1514 && FW_MSG_MAX == sizeof(struct fw_hdr) + 1600, "frame/message limits");
 
+	/* DMA arena ABI: the kernel copies this struct straight out; a layout or
+	 * ioctl-number change would leave wland with a bogus arena */
+	check(sizeof(struct fw_dma_arena) == 24, "fw_dma_arena is 24 bytes");
+	check(offsetof(struct fw_dma_arena, pa) == 0 && offsetof(struct fw_dma_arena, iova) == 8
+	      && offsetof(struct fw_dma_arena, size) == 16, "fw_dma_arena field order");
+	check(FW_IOCTL_DMA_ARENA == 0x40185702ul, "FW_IOCTL_DMA_ARENA Darwin number");
+	check(FW_IOCTL_SMMU_STATUS == 0x40045701ul, "FW_IOCTL_SMMU_STATUS Darwin number");
+
 	/* a message frames exactly: header then len payload bytes */
 	uint8_t buf[FW_MSG_MAX];
 	struct fw_hdr h = { .type = FW_JOIN, .len = sizeof(struct fw_join) };

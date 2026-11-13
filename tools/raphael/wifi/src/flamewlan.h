@@ -9,6 +9,23 @@
 #ifndef FLAMEWLAN_H
 #define FLAMEWLAN_H
 #include <stdint.h>
+#include <sys/ioccom.h>
+
+/* wland -> kernel: does the WLAN SMMU stream exist? out: uint32_t, 1 = translating */
+#define FW_IOCTL_SMMU_STATUS    _IOR('W', 1, uint32_t)
+
+/*
+ * wland -> kernel: the WLAN DMA arena. Kernel-owned physical memory mapped at
+ * low WLAN IOVAs by the dedicated apps-SMMU bank; the offset is identical in
+ * both addresses (cpu_pa + off / iova + off). Root only; ENXIO when DMA setup
+ * failed, in which case the radio must not start.
+ */
+struct fw_dma_arena {
+	uint64_t pa;		/* CPU physical base (for /dev/pmem) */
+	uint64_t iova;		/* device address base (for descriptors/rings) */
+	uint64_t size;		/* bytes, 4 KiB aligned */
+};
+#define FW_IOCTL_DMA_ARENA      _IOR('W', 2, struct fw_dma_arena)
 
 struct fw_hdr {
 	uint16_t type;

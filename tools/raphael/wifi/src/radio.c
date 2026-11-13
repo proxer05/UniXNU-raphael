@@ -4,9 +4,10 @@
  *  - apps SMMU: the WLAN stream 0x640 (mask 1) gets a context bank with translation off, the way
  *    ABL's own streams and our USB stream run (sweet_usb.c ud_smmu_setup): the WLAN DMA then uses
  *    physical addresses. Must be in place before the WLAN firmware touches host memory.
- *  - copy engines at 0x18800000 + 0x240000, polled (no interrupts); rings and buffers in RAM below
- *    4 GB that XNU does not manage (0xE0000000: /dev/pmem maps it as device memory, so no cache
- *    maintenance is needed; WMI host memory chunks only take 32-bit addresses).
+ *  - copy engines at 0x18800000 + 0x240000, polled (no interrupts); rings and buffers come from
+ *    the kernel's DMA arena (/dev/wlan FW_IOCTL_DMA_ARENA): kernel-owned RAM with a low WLAN IOVA
+ *    for the device (raphael: 0xa0000000), so cpu_pa (pmem) and iova (descriptors/rings) differ.
+ *    Every address below is kept in both forms; never pass one to the other side.
  *  - HTC: READY on ep0, connect HTT_DATA and WMI_CONTROL, SETUP_COMPLETE_EX.
  *  - WMI (TLV): SERVICE_READY -> INIT -> READY; HTT version, frag bank, rx ring, aggr (without the
  *    host rx ring no beacon reaches the scan); then a channel list, a station vdev and a passive
@@ -14,6 +15,9 @@
  *    prints them.
  */
 #include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +25,8 @@
 #include <CommonCrypto/CommonKeyDerivation.h>
 #include <CommonCrypto/CommonSymmetricKeywrap.h>
 #include "pmem.h"
+#include "flamewlan.h"
+#include "radio_dma.h"
 #include "link.h"
 #include "radio.h"
 
@@ -31,27 +37,41 @@ const uint8_t radio_mac[6] = { 0x02, 0x50, 0x49, 0x58, 0x45, 0x4c };	/* what WLF
 
 /* ---------------------------------------------------------------- host memory */
 
-#define POOL_PA		0x8a000000ull	/* raphael: inside removed_regions 0x86200000..0x8b700000 (verify by probe) */
-#define POOL_SIZE	0x01000000ull
-static uint64_t pool_next = POOL_PA;
-
-static void pool_zero(uint64_t pa, uint64_t len)
+/*
+ * All radio buffers come from the kernel-wide WLAN DMA arena (radio_dma.c): it
+ * is kernel-owned physical memory with a low device address, handed out by
+ * /dev/wlan once per boot. No physical pool is assumed anywhere.
+ */
+static int radio_dma_acquire(void)
 {
-	static const uint8_t z[65536];
-	for (uint64_t o = 0; o < len; o += sizeof(z))
-		pm_wr(pa + o, z, MIN(len - o, (uint64_t)sizeof(z)));
-}
+	static int done;
 
-/* zeroed, page aligned; 0 when the pool is used up */
-static uint64_t pool_alloc(uint64_t size)
-{
-	size = (size + 0xfff) & ~0xfffull;
-	if (pool_next + size > POOL_PA + POOL_SIZE)
+	if (done) {
 		return 0;
-	uint64_t pa = pool_next;
-	pool_next += size;
-	pool_zero(pa, size);
-	return pa;
+	}
+	int fd = open("/dev/wlan", O_RDONLY);
+	if (fd < 0) {
+		printf("radio: no /dev/wlan for the DMA arena (%s)\n", strerror(errno));
+		return -1;
+	}
+	struct fw_dma_arena a;
+	int rc = ioctl(fd, FW_IOCTL_DMA_ARENA, &a);
+	close(fd);
+	if (rc != 0) {
+		printf("radio: DMA arena query failed (%s)\n", strerror(errno));
+		return -1;
+	}
+	if (rdma_init(a.pa, a.iova, a.size)) {
+		printf("radio: invalid DMA arena cpu %#llx iova %#llx size %#llx\n",
+		    (unsigned long long)a.pa, (unsigned long long)a.iova, (unsigned long long)a.size);
+		return -1;
+	}
+	LOG("radio: dma arena cpu %#llx..%#llx -> iova %#llx..%#llx (%llu KiB)",
+	    (unsigned long long)a.pa, (unsigned long long)(a.pa + a.size),
+	    (unsigned long long)a.iova, (unsigned long long)(a.iova + a.size),
+	    (unsigned long long)(a.size >> 10));
+	done = 1;
+	return 0;
 }
 
 /* pmem device accesses are 32-bit: lengths round up to 4 */
@@ -83,8 +103,44 @@ static int sid_match(uint32_t smr, uint32_t sid, uint32_t mask)
 	return ((id ^ sid) & ~(m | mask) & 0x7fff) == 0;
 }
 
+/*
+ * The kernel maps the WLAN SMMU streams 0x640/0x641 at /dev/wlan init and
+ * reports through FW_IOCTL_SMMU_STATUS (flamewlan.h).
+ * That is the only way to check on raphael: reading the SMMU registers
+ * through /dev/pmem hangs the SoC (hypervisor-owned block). The MMIO probe
+ * below stays only for donor hardware, behind WLAND_SMMU=1.
+ */
+
+static int kernel_smmu_status(void)
+{
+	int fd = open("/dev/wlan", O_RDONLY);
+	if (fd < 0) {
+		return -1;
+	}
+	uint32_t ok = 0;
+	int rc = ioctl(fd, FW_IOCTL_SMMU_STATUS, &ok);
+	close(fd);
+	if (rc != 0) {
+		printf("smmu: /dev/wlan ioctl failed (%s)\n", strerror(errno));
+		return -1;
+	}
+	if (ok == 1) {
+		smmu_done = 1;
+		printf("smmu: kernel reports WLAN streams 0x640/0x641 translating\n");
+		return 0;
+	}
+	printf("smmu: kernel reports WLAN streams NOT mapped\n");
+	return -1;
+}
+
 int smmu_wlan_identity(void)
 {
+	if (kernel_smmu_status() == 0) {
+		return 0;
+	}
+	if (!getenv("WLAND_SMMU")) {
+		return -1;
+	}
 	uint64_t s = SMMU_PA;
 	uint32_t id0 = rd32(s + 0x20), id1 = rd32(s + 0x24);
 	uint32_t nsmr = id0 & 0xff, ncb = id1 & 0xff;
@@ -189,12 +245,12 @@ static const struct ce_attr ce_attr[CE_COUNT] = {
 };
 
 struct ce_state {
-	uint64_t src_pa, dst_pa, rx_pa, tx_pa;
+	uint64_t src_pa, src_dma, dst_pa, dst_dma, rx_pa, rx_dma, tx_pa, tx_dma;
 	uint32_t src_n, dst_n, src_wr, dst_wr, dst_sw;
 	uint32_t rx, tx, tx_full;
 };
 static struct ce_state ce[CE_COUNT];
-static uint64_t rri_pa;
+static uint64_t rri_pa, rri_dma;
 static int ce_up;
 
 static int ce_host_rx(uint32_t c) { return ce_attr[c].dst_n != 0 && c != 7; }
@@ -215,7 +271,7 @@ static void ce_post(uint32_t c)
 {
 	struct ce_state *s = &ce[c];
 	uint32_t slot = s->dst_wr;
-	desc_put(s->dst_pa + (uint64_t)slot * DESC, s->rx_pa + (uint64_t)(slot % RX_POST) * RX_BUF_SIZE, 0, 0);
+	desc_put(s->dst_pa + (uint64_t)slot * DESC, s->rx_dma + (uint64_t)(slot % RX_POST) * RX_BUF_SIZE, 0, 0);
 	s->dst_wr = (slot + 1) & (s->dst_n - 1);
 }
 
@@ -227,37 +283,41 @@ static int ce_start(void)
 		LOG("ce: the WLAN SMMU stream is not set up: no DMA, not starting");
 		return -1;
 	}
-	rri_pa = pool_alloc(0x1000);
+	if (rdma_alloc(0x1000, 0x1000, &rri_pa, &rri_dma)) {
+		LOG("ce: no host memory (rri)");
+		return -1;
+	}
 	for (uint32_t c = 0; c < CE_COUNT; c++) {
 		struct ce_state *s = &ce[c];
 		s->src_n = ce_attr[c].src_n ? pow2(ce_attr[c].src_n) : 0;
 		s->dst_n = ce_attr[c].dst_n ? pow2(ce_attr[c].dst_n) : 0;
-		if (s->src_n)
-			s->src_pa = pool_alloc((uint64_t)s->src_n * DESC);
-		if (s->dst_n)
-			s->dst_pa = pool_alloc((uint64_t)s->dst_n * DESC);
-		if (ce_host_rx(c))
-			s->rx_pa = pool_alloc(RX_POST * RX_BUF_SIZE);
-		if (ce_host_tx(c))
-			s->tx_pa = pool_alloc((uint64_t)ce_tx_slots(c) * ce_tx_sz(c));
+		if (s->src_n && rdma_alloc((uint64_t)s->src_n * DESC, 0x1000, &s->src_pa, &s->src_dma))
+			s->src_pa = 0;
+		if (s->dst_n && rdma_alloc((uint64_t)s->dst_n * DESC, 0x1000, &s->dst_pa, &s->dst_dma))
+			s->dst_pa = 0;
+		if (ce_host_rx(c) && rdma_alloc(RX_POST * RX_BUF_SIZE, 0x100, &s->rx_pa, &s->rx_dma))
+			s->rx_pa = 0;
+		if (ce_host_tx(c) && rdma_alloc((uint64_t)ce_tx_slots(c) * ce_tx_sz(c), 0x100, &s->tx_pa, &s->tx_dma))
+			s->tx_pa = 0;
 		if ((s->src_n && !s->src_pa) || (s->dst_n && !s->dst_pa) || (ce_host_rx(c) && !s->rx_pa) ||
 		    (ce_host_tx(c) && !s->tx_pa) || !rri_pa) {
 			LOG("ce: out of host memory");
 			return -1;
 		}
 	}
-	LOG("ce: host memory %llx..%llx", (unsigned long long)POOL_PA, (unsigned long long)pool_next);
+	LOG("ce: host memory %llx..%llx (dma arena used %llu KiB)", (unsigned long long)rri_pa,
+	    (unsigned long long)(rri_pa + 0x1000), (unsigned long long)(rdma_used() >> 10));
 	/* the CE writes its read indices to rri[ce] (source [15:0], destination [31:16]) */
-	wr32(CE_PA + WRAP_RRI_LO, (uint32_t)rri_pa);
-	wr32(CE_PA + WRAP_RRI_HI, (uint32_t)(rri_pa >> 32) & ADDR_HI_MASK);
+	wr32(CE_PA + WRAP_RRI_LO, (uint32_t)rri_dma);
+	wr32(CE_PA + WRAP_RRI_HI, (uint32_t)(rri_dma >> 32) & ADDR_HI_MASK);
 	for (uint32_t c = 0; c < CE_COUNT; c++)
 		ce_wr(c, CTRL1, ce_rd(c, CTRL1) | CTRL1_RRI_UPD);
 	for (uint32_t c = 0; c < CE_COUNT; c++) {
 		struct ce_state *s = &ce[c];
 		if (s->src_n) {				/* ath10k_ce_init_src_ring */
 			s->src_wr = ce_rd(c, SR_WR_IDX) & (s->src_n - 1);
-			ce_wr(c, SR_BASE_LO, (uint32_t)s->src_pa);
-			ce_wr(c, SR_BASE_HI, (uint32_t)(s->src_pa >> 32) & ADDR_HI_MASK);
+			ce_wr(c, SR_BASE_LO, (uint32_t)s->src_dma);
+			ce_wr(c, SR_BASE_HI, (uint32_t)(s->src_dma >> 32) & ADDR_HI_MASK);
 			ce_wr(c, SR_SIZE, s->src_n);
 			ce_wr(c, CTRL1, (ce_rd(c, CTRL1) & ~(CTRL1_DMAX | CTRL1_SRC_SWAP)) | ce_attr[c].src_max);
 			ce_wr(c, SRC_WM, s->src_n);
@@ -265,8 +325,8 @@ static int ce_start(void)
 		if (s->dst_n) {				/* ath10k_ce_init_dest_ring */
 			s->dst_sw = ce_rd(c, CUR_DRRI) & (s->dst_n - 1);
 			s->dst_wr = ce_rd(c, DR_WR_IDX) & (s->dst_n - 1);
-			ce_wr(c, DR_BASE_LO, (uint32_t)s->dst_pa);
-			ce_wr(c, DR_BASE_HI, (ce_rd(c, DR_BASE_HI) & ~ADDR_HI_MASK) | ((uint32_t)(s->dst_pa >> 32) & ADDR_HI_MASK));
+			ce_wr(c, DR_BASE_LO, (uint32_t)s->dst_dma);
+			ce_wr(c, DR_BASE_HI, (ce_rd(c, DR_BASE_HI) & ~ADDR_HI_MASK) | ((uint32_t)(s->dst_dma >> 32) & ADDR_HI_MASK));
 			ce_wr(c, DR_SIZE, s->dst_n);
 			ce_wr(c, CTRL1, ce_rd(c, CTRL1) & ~CTRL1_DST_SWAP);
 			ce_wr(c, DST_WM, s->dst_n);
@@ -330,9 +390,10 @@ static int ce_send(uint32_t c, const void *data, uint32_t len, uint32_t transfer
 		return -1;
 	}
 	uint32_t slot = s->src_wr;
-	uint64_t bpa = s->tx_pa + (uint64_t)(slot % ce_tx_slots(c)) * ce_tx_sz(c);
+	uint64_t boff = (uint64_t)(slot % ce_tx_slots(c)) * ce_tx_sz(c);
+	uint64_t bpa = s->tx_pa + boff, bda = s->tx_dma + boff;
 	mem_wr(bpa, data, len);
-	desc_put(s->src_pa + (uint64_t)slot * DESC, bpa, (uint16_t)len, (uint16_t)((transfer_id << 4) & 0xfff0));
+	desc_put(s->src_pa + (uint64_t)slot * DESC, bda, (uint16_t)len, (uint16_t)((transfer_id << 4) & 0xfff0));
 	s->src_wr = (slot + 1) & mask;
 	s->tx++;
 	wr32(SHADOW_PA + 4 * c, s->src_wr);		/* shadow SR write index of CE c */
@@ -625,7 +686,7 @@ static void wmi_send_init(void)
 	static uint8_t m[1024];
 	uint8_t *p = m;
 	uint32_t total = 0, n = wmi_nreq, len[MAX_MEM_REQS];
-	uint64_t pa = 0;
+	uint64_t pa = 0, da = 0;
 
 	for (uint32_t i = 0; i < n; i++) {
 		uint32_t units = wmi_req[i].num_units;
@@ -636,7 +697,7 @@ static void wmi_send_init(void)
 		len[i] = units * ((wmi_req[i].unit_size + 3) & ~3u);
 		total += (len[i] + 0xfff) & ~0xfffu;
 	}
-	if (total && (total > MAX_MEM_TOTAL || !(pa = pool_alloc(total)))) {
+	if (total && (total > MAX_MEM_TOTAL || rdma_alloc(total, 0x1000, &pa, &da))) {
 		LOG("wmi: host memory %u bytes not given", total);
 		n = 0;
 	}
@@ -687,13 +748,13 @@ static void wmi_send_init(void)
 	p += sizeof(rc);
 	p = put_tlv(p, TAG_ARRAY_STRUCT, n * 20);
 	for (uint32_t i = 0, off = 0; i < n; i++) {
-		uint64_t cpa = pa + off;
+		uint64_t cda = da + off;		/* the firmware sees the dma address */
 		off += (len[i] + 0xfff) & ~0xfffu;
 		uint8_t *c = put_tlv(p, TAG_HOST_MEM_CHUNK, 16);
 		c = put32(c, wmi_req[i].req_id);
-		c = put32(c, (uint32_t)cpa);
+		c = put32(c, (uint32_t)cda);
 		c = put32(c, len[i]);
-		put32(c, wmi_svc(SVC_EXTEND_ADDRESS) ? (uint32_t)(cpa >> 32) : 0);
+		put32(c, wmi_svc(SVC_EXTEND_ADDRESS) ? (uint32_t)(cda >> 32) : 0);
 		p += 20;
 	}
 	wmi_init_sent = !wmi_send(WMI_CMD_INIT, m, (uint32_t)(p - m));
@@ -1030,7 +1091,8 @@ void radio_summary(void)
 #define OFF_HDR_STATUS		74
 #define OFF_MSDU_PAYLOAD	90
 
-static uint64_t htt_ring_pa, htt_idx_pa, htt_bank_pa, htt_buf_pa;
+static uint64_t htt_ring_pa, htt_ring_dma, htt_idx_pa, htt_idx_dma;
+static uint64_t htt_bank_pa, htt_bank_dma, htt_buf_pa, htt_buf_dma;
 static uint32_t htt_alloc, htt_state, htt_msgs, htt_msdus;
 static uint64_t htt_req_ms;
 
@@ -1038,8 +1100,12 @@ static int htt_send(const void *d, uint32_t len) { return htt_eid == 0xff ? -1 :
 
 static void htt_post(uint64_t pa)
 {
+	uint64_t dma = rdma_pa_to_iova(pa);
+
+	if (!dma)
+		return;					/* not ours: never publish it */
 	wr32(pa + 4 * OFF_ATTENTION, 0);
-	mem_wr(htt_ring_pa + 8ull * htt_alloc, &pa, 8);
+	mem_wr(htt_ring_pa + 8ull * htt_alloc, &dma, 8);
 	htt_alloc = (htt_alloc + 1) & (HTT_RING_SIZE - 1);
 }
 
@@ -1058,7 +1124,7 @@ static void htt_configure(const char *why)
 	*p++ = 0;
 	*p++ = 1;					/* num_banks */
 	*p++ = HTT_EXT_DESC_SIZE;
-	p = put64(p, htt_bank_pa);
+	p = put64(p, htt_bank_dma);
 	p += 3 * 8;
 	p = put16(p, 0);
 	p = put16(p, HTT_MAX_PENDING_TX - 1);
@@ -1075,8 +1141,8 @@ static void htt_configure(const char *why)
 	*p++ = H2T_RX_RING_CFG;
 	*p++ = 1;
 	p = put16(p, 0);
-	p = put64(p, htt_idx_pa);
-	p = put64(p, htt_ring_pa);
+	p = put64(p, htt_idx_dma);
+	p = put64(p, htt_ring_dma);
 	p = put16(p, HTT_RING_SIZE);
 	p = put16(p, HTT_BUF_SIZE);
 	p = put16(p, 0xffff);				/* every frame type, management included */
@@ -1108,15 +1174,20 @@ static void htt_start(void)
 
 	if (htt_state != 0)
 		return;
-	if (!(pa = pool_alloc(ring + bank + (uint64_t)HTT_RING_SIZE * HTT_BUF_SIZE))) {
+	uint64_t da;
+	if (rdma_alloc(ring + bank + (uint64_t)HTT_RING_SIZE * HTT_BUF_SIZE, 0x1000, &pa, &da)) {
 		LOG("htt: no memory, scanning without it");
 		scan_start();
 		return;
 	}
 	htt_ring_pa = pa;
+	htt_ring_dma = da;
 	htt_idx_pa = pa + HTT_RING_SIZE * 8;
+	htt_idx_dma = da + HTT_RING_SIZE * 8;
 	htt_bank_pa = pa + ring;
+	htt_bank_dma = da + ring;
 	htt_buf_pa = pa + ring + bank;
+	htt_buf_dma = da + ring + bank;
 	htt_state = 1;
 	htt_req_ms = link_ms();
 	uint8_t m[4] = { H2T_VERSION_REQ, 0, 0, 0 };
@@ -1146,10 +1217,14 @@ static void htt_rx(const uint8_t *p, uint32_t len)
 		memcpy(&n, p + 6, 2);
 		const uint8_t *d = p + 8;
 		for (uint32_t i = 0; i < n && 8 + (i + 1) * 12 <= len; i++, d += 12) {
-			uint64_t pa;
-			memcpy(&pa, d, 8);
-			if (pa < htt_buf_pa || pa >= htt_buf_pa + (uint64_t)HTT_RING_SIZE * HTT_BUF_SIZE ||
-			    (pa - htt_buf_pa) % HTT_BUF_SIZE)
+			uint64_t dma, pa;
+			memcpy(&dma, d, 8);
+			/* the firmware returns a dma address; only our HTT rx ring is
+			 * ever valid here, and it must be resolved to the cpu pa */
+			if (!htt_buf_dma || dma < htt_buf_dma ||
+			    dma >= htt_buf_dma + (uint64_t)HTT_RING_SIZE * HTT_BUF_SIZE ||
+			    (dma - htt_buf_dma) % HTT_BUF_SIZE || rdma_iova_to_pa(dma, &pa) ||
+			    pa < htt_buf_pa || pa >= htt_buf_pa + (uint64_t)HTT_RING_SIZE * HTT_BUF_SIZE)
 				continue;
 			htt_msdus++;
 			uint16_t mlen;
@@ -1233,7 +1308,7 @@ static uint8_t s_assoc_req[512];
 static uint32_t s_assoc_req_len;
 static uint8_t s_rsn_ie[22];
 static uint8_t s_ptk[48], s_anonce[32], s_snonce[32], s_group_cipher;
-static uint64_t s_replay, s_mgmt_pa, tx_pool_pa, tx_busy;
+static uint64_t s_replay, s_mgmt_pa, s_mgmt_dma, tx_pool_pa, tx_pool_dma, tx_busy;
 static uint32_t tx_sent, tx_done, tx_fail, rx_up;
 
 void (*radio_rx_hook)(const uint8_t *frame, uint32_t len);
@@ -1319,8 +1394,8 @@ static int htt_tx_frame(const uint8_t *f, uint32_t len, int clear)
 {
 	uint8_t m[20 + 52] = { 0 }, ext[HTT_EXT_DESC_SIZE] = { 0 }, *p = m;
 	uint32_t id, pf = (MIN(len, (uint32_t)PREFETCH_LEN) + 3) & ~3u;
-	if (!tx_pool_pa)
-		tx_pool_pa = pool_alloc(TX_SLOTS * TX_SLOT_SIZE);
+	if (!tx_pool_pa && rdma_alloc(TX_SLOTS * TX_SLOT_SIZE, 0x100, &tx_pool_pa, &tx_pool_dma))
+		tx_pool_pa = 0;
 	if (!tx_pool_pa || !htt_bank_pa || htt_state != 2 || len > TX_SLOT_SIZE)
 		return -1;
 	for (id = 0; id < TX_SLOTS && (tx_busy & (1ull << id)); id++)
@@ -1328,9 +1403,10 @@ static int htt_tx_frame(const uint8_t *f, uint32_t len, int clear)
 	if (id == TX_SLOTS)
 		return -1;
 	uint64_t pa = tx_pool_pa + (uint64_t)id * TX_SLOT_SIZE;
+	uint64_t da = tx_pool_dma + (uint64_t)id * TX_SLOT_SIZE;
 	mem_wr(pa, f, len);
-	uint32_t lo = (uint32_t)pa;			/* frags[0] at +24: paddr_lo, paddr_hi16, len16 */
-	uint16_t hi = (uint16_t)(pa >> 32), l16 = (uint16_t)len;
+	uint32_t lo = (uint32_t)da;			/* frags[0] at +24: paddr_lo, paddr_hi16, len16 */
+	uint16_t hi = (uint16_t)(da >> 32), l16 = (uint16_t)len;
 	memcpy(ext + 24, &lo, 4);
 	memcpy(ext + 28, &hi, 2);
 	memcpy(ext + 30, &l16, 2);
@@ -1340,7 +1416,7 @@ static int htt_tx_frame(const uint8_t *f, uint32_t len, int clear)
 	p = put16(p, (uint16_t)(TXF1_TID_NONQOS | TXF1_POSTPONED));	/* vdev 0 */
 	p = put16(p, (uint16_t)len);
 	p = put16(p, (uint16_t)id);
-	p = put64(p, htt_bank_pa + (uint64_t)id * HTT_EXT_DESC_SIZE);
+	p = put64(p, htt_bank_dma + (uint64_t)id * HTT_EXT_DESC_SIZE);
 	p = put32(p, 0xffff);				/* peer id: invalid */
 	memcpy(p, f, MIN(len, pf));
 	if (htt_send(m, 20 + pf))
@@ -1421,8 +1497,8 @@ static int w_mgmt_tx(const uint8_t *f, uint32_t len)
 	uint8_t m[4 + 28 + 4 + 64] = { 0 }, *p;
 	uint32_t buf = (MIN(len, 64u) + 3) & ~3u;
 	static uint8_t copy[0x1000];
-	if (!s_mgmt_pa)
-		s_mgmt_pa = pool_alloc(0x1000);
+	if (!s_mgmt_pa && rdma_alloc(0x1000, 0x1000, &s_mgmt_pa, &s_mgmt_dma))
+		s_mgmt_pa = 0;
 	if (!s_mgmt_pa || len > sizeof(copy) - 8)
 		return -1;
 	memset(copy, 0, ((len + 3) & ~3u) + 4);
@@ -1432,7 +1508,7 @@ static int w_mgmt_tx(const uint8_t *f, uint32_t len)
 	p = put32(p, 0);
 	p = put32(p, ++s_desc);
 	p = put32(p, 0);
-	p = put64(p, s_mgmt_pa);
+	p = put64(p, s_mgmt_dma);
 	p = put32(p, len);
 	p = put32(p, buf);
 	p = put_tlv(p, TAG_ARRAY_BYTE, buf);
@@ -2022,7 +2098,7 @@ static uint64_t start_ms;
 
 int radio_start(void)
 {
-	if (ce_start())
+	if (radio_dma_acquire() || ce_start())
 		return -1;
 	start_ms = link_ms();
 	return 0;

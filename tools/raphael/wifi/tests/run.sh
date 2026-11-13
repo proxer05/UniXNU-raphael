@@ -14,7 +14,7 @@ trap 'rm -rf "$OUT"' EXIT
 # in the donor's build list (incomplete leftovers) and are not vendored.
 SRCS="../src/smem.c ../src/pmem.c ../src/glink.c ../src/link.c ../src/qrtr_mux.c \
       ../src/qmi.c ../src/rmtfs.c ../src/pdmapper.c ../src/servreg.c ../src/tftp.c \
-      ../src/scm.c ../src/wlfw.c ../src/radio.c"
+      ../src/scm.c ../src/wlfw.c ../src/radio.c ../src/radio_dma.c"
 
 echo "== compiling $(printf '%s\n' $SRCS | wc -l) protocol sources =="
 # Host transform (src/ stays verbatim): the ARM64 "dsb sy" barrier is not
@@ -32,5 +32,9 @@ $CC $CFLAGS -Dsysctlbyname=host_sysctlbyname test_crypto_stubs.c host_stubs.c -o
 echo "== /dev/wlan message ABI tests =="
 $CC $CFLAGS test_flamewlan_abi.c -o "$OUT/t_abi"
 "$OUT/t_abi"
+
+echo "== radio DMA arena (cpu pa vs device iova) tests =="
+$CC $CFLAGS test_radio_dma.c "$OUT/radio_dma.o" -o "$OUT/t_rdma"
+"$OUT/t_rdma"
 
 echo 'run.sh: OK'

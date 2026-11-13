@@ -273,10 +273,10 @@ index 0000000..72b205c
 +}
 diff --git a/bsd/dev/flame_wlan.c b/bsd/dev/flame_wlan.c
 new file mode 100644
-index 0000000..c422cd0
+index 0000000..a748c37
 --- /dev/null
 +++ b/bsd/dev/flame_wlan.c
-@@ -0,0 +1,513 @@
+@@ -0,0 +1,559 @@
 +/*
 + * flame: the WCN3990 radio for the kernel's Wi-Fi station. bsd/dev/flame_sta.c (ios-topaz 0900's topaz_sta.c)
 + * puts en0 and wifid's Apple80211 requests (bsd/dev/redwood_*.c) on this file's flame_wlan_* C API, the one
@@ -303,7 +303,12 @@ index 0000000..c422cd0
 +#include <kern/locks.h>
 +#include <pexpert/pexpert.h>
 +#include <libkern/libkern.h>
++#include <machine/machine_routines.h>
++#include <vm/pmap.h>
++#include <vm/vm_kern.h>
++#include <vm/vm_kern_xnu.h>       /* kmem_alloc_contig */
 +#include <sys/flame_wlan.h>
++#include "sweet_board.h"          /* sweet_dma_sync_va */
 +
 +void flame_wlan_init(void);
 +void flame_sta_init(void);              /* bsd/dev/flame_sta.c */
@@ -714,8 +719,6 @@ index 0000000..c422cd0
 +	return 0;
 +}
 +
-+static int fw_ioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p);
-+
 +static const struct cdevsw fw_cdevsw = {
 +	.d_open       = fw_open,
 +	.d_close      = fw_close,
@@ -740,24 +743,41 @@ index 0000000..c422cd0
 + */
 +/*
 + * The WLAN device walks host DRAM through the apps SMMU with stream IDs 0x640
-+ * and 0x641 (mainline sm8150.dtsi: iommus = <&apps_smmu 0x0640 0x1>). The
-+ * streams are mapped kernel-side (sweet_smmu.c, the same path the USB
-+ * controller uses) because reading the SMMU registers through /dev/pmem from
-+ * userland hangs the SoC on raphael. wland asks FW_IOCTL_SMMU_STATUS before
-+ * starting the copy engines.
++ * and 0x641 (raphael DT: iommus = <&apps_smmu 0x0640 0x1>). Reading the SMMU
++ * registers through /dev/pmem from userland hangs the SoC, so the whole DMA
++ * setup is kernel-side: one physically contiguous arena from kernel-owned RAM
++ * (never reserved/no-map memory) is allocated here and translated to the
++ * board's WLAN IOVA window by sweet_smmu.c's dedicated context bank. wland
++ * asks FW_IOCTL_DMA_ARENA for {cpu pa, iova, size} and sub-allocates; it must
++ * not touch the copy engines if either the status or the arena query fails.
 + */
-+extern int sweet_smmu_map_sid(unsigned sid);
++#define FW_DMA_ARENA_SIZE       (8u << 20)
++extern int sweet_smmu_wlan_setup(uint64_t arena_pa, size_t arena_size);
++extern int sweet_smmu_wlan_info(uint64_t *pa, uint64_t *iova, uint64_t *size);
 +static int fw_smmu_ok;
++static uint64_t fw_dma_pa, fw_dma_iova, fw_dma_size;
++static vm_offset_t fw_dma_va;
 +
 +static int
 +fw_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag, __unused struct proc *p)
 +{
++	struct fw_dma_arena *a;
++
 +	if (!kauth_cred_issuser(kauth_cred_get())) {
 +		return EPERM;
 +	}
 +	switch (cmd) {
 +	case FW_IOCTL_SMMU_STATUS:
 +		*(uint32_t *)data = (uint32_t)fw_smmu_ok;
++		return 0;
++	case FW_IOCTL_DMA_ARENA:
++		if (!fw_smmu_ok) {
++			return ENXIO;
++		}
++		a = (struct fw_dma_arena *)data;
++		a->pa = fw_dma_pa;
++		a->iova = fw_dma_iova;
++		a->size = fw_dma_size;
 +		return 0;
 +	default:
 +		return ENOTTY;
@@ -778,12 +798,38 @@ index 0000000..c422cd0
 +		return;
 +	}
 +	devfs_make_node(makedev(major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0600, "wlan");
++	/*
++	 * Kernel-owned DMA arena for the radio. It stays for the phone boot: a
++	 * modem/WLFW restart can reuse the same translation, and nothing is ever
++	 * unmapped while the device could still be walking it.
++	 */
 +	{
-+		int e1 = sweet_smmu_map_sid(0x640);
-+		int e2 = sweet_smmu_map_sid(0x641);
-+		fw_smmu_ok = e1 == 0 && e2 == 0;
-+		printf("flame wlan: apps SMMU streams 0x640/0x641 -> %d/%d (%s)\n", e1, e2,
-+		    fw_smmu_ok ? "translating" : "NOT mapped");
++		int e = ENOMEM;
++		if (kmem_alloc_contig(kernel_map, &fw_dma_va, FW_DMA_ARENA_SIZE, PAGE_MASK, 0, 0,
++		    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) == KERN_SUCCESS) {
++			ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)fw_dma_va);
++			if (pn) {
++				fw_dma_pa = ptoa_64(pn);
++				fw_dma_size = FW_DMA_ARENA_SIZE;
++				e = sweet_smmu_wlan_setup(fw_dma_pa, FW_DMA_ARENA_SIZE);
++				if (e == 0) {
++					sweet_dma_sync_va((const void *)fw_dma_va, FW_DMA_ARENA_SIZE);
++				}
++			}
++		} else {
++			printf("flame wlan: no contiguous DMA arena (%u bytes)\n", FW_DMA_ARENA_SIZE);
++		}
++		fw_smmu_ok = e == 0;
++		if (fw_smmu_ok) {
++			printf("flame wlan: DMA arena cpu %#llx..%#llx -> wlan iova %#llx..%#llx (%s)\n",
++			    (unsigned long long)fw_dma_pa,
++			    (unsigned long long)(fw_dma_pa + fw_dma_size),
++			    (unsigned long long)fw_dma_iova,
++			    (unsigned long long)(fw_dma_iova + fw_dma_size),
++			    "kernel-owned, SIDs 0x640/0x641 translating");
++		} else {
++			printf("flame wlan: WLAN DMA not set up (%d): radio will not start\n", e);
++		}
 +	}
 +	redwood_net_init();
 +	flame_sta_init();
@@ -2364,10 +2410,10 @@ index 0000000..4c73786
 +}
 diff --git a/bsd/dev/sweet_pmem.c b/bsd/dev/sweet_pmem.c
 new file mode 100644
-index 0000000..acb484a
+index 0000000..6fe45d5
 --- /dev/null
 +++ b/bsd/dev/sweet_pmem.c
-@@ -0,0 +1,408 @@
+@@ -0,0 +1,416 @@
 +/*
 + * /dev/pmem: physical memory for userland hardware experiments (the GPU
 + * bring-up in work/userland/gpu runs on it over SSH, no reboot per try).
@@ -2413,6 +2459,7 @@ index 0000000..acb484a
 +#include <vm/vm_kern_xnu.h>       /* xnu-11215: kmem_alloc_contig lives here */
 +#include <pexpert/pexpert.h>
 +#include <libkern/libkern.h>
++#include "sweet_board.h"       /* sweet_dma_sync_va (real civac by VA) */
 +
 +extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
 +extern boolean_t pmap_valid_address(uint64_t pa);
@@ -2520,9 +2567,16 @@ index 0000000..acb484a
 +		unsigned n = (unsigned)MIN((user_ssize_t)(PAGE_SIZE - off), uio_resid(uio));
 +		if (pmap_valid_address(pa)) {
 +			caddr_t va = (caddr_t)phystokv(pa);
-+			flush_dcache64((addr64_t)pa, n, TRUE);
++			/*
++			 * This kernel defines __ARM_COHERENT_IO__, which makes
++			 * flush_dcache64() a bare dsb. The WCN3990 (and the other
++			 * Qualcomm masters here) are not coherent with the CPU, so
++			 * clean+invalidate the lines by VA around the transfer or a
++			 * device may read stale descriptors/rings.
++			 */
++			sweet_dma_sync_va(va, n);
 +			err = uiomove(va, (int)n, uio);
-+			flush_dcache64((addr64_t)pa, n, TRUE);
++			sweet_dma_sync_va(va, n);
 +			continue;
 +		}
 +		if ((pa | n) & 3) {
@@ -2942,6 +2996,265 @@ index 2d88a34..40e5ec1 100644
 +	return error;
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_smmu.c b/bsd/dev/sweet_smmu.c
+index d7dc290..c2ee7ad 100644
+--- a/bsd/dev/sweet_smmu.c
++++ b/bsd/dev/sweet_smmu.c
+@@ -38,6 +38,8 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ int sweet_smmu_map_sid(unsigned sid);
+ int sweet_smmu_probe_sid(unsigned sid, unsigned level);
++int sweet_smmu_wlan_setup(uint64_t arena_pa, size_t arena_size);
++int sweet_smmu_wlan_info(uint64_t *pa, uint64_t *iova, uint64_t *size);
+ 
+ #define SMMU_PA         0x15000000u     /* apps_smmu */
+ #define SMMU_SIZE       0x100000u
+@@ -311,4 +313,245 @@ out:
+ 	__atomic_store_n(&smmu_lock, 0, __ATOMIC_RELEASE);
+ 	return result;
+ }
++
++/*
++ * ---- dedicated WLAN context bank (raphael) ----
++ *
++ * The WCN3990 must see host buffers at low IOVAs (raphael Linux icnss:
++ * smmu_iova_base 0xa0000000 + 0x10000000), while the memory itself is
++ * kernel-owned high-bank RAM. That needs a translating stage-1 bank of its
++ * own: the shared identity bank maps 0xa0000000 as a 1 GiB block, so an
++ * alias there would collide with USB's identity mapping. Linux does the same
++ * (icnss has a dedicated context bank via iommu-map).
++ *
++ * The bank's 4 KiB tables translate exactly [WLAN_IOVA_BASE, +size) to the
++ * arena's physical pages. SIDs 0x640/0x641 (DT iommus = <&apps_smmu 0x0640 0x1>)
++ * are pointed at it with translating S2CR entries.
++ */
++#define WLAN_IOVA_BASE  0xa0000000ull   /* DT: icnss smmu_iova_base */
++#define PTE_4K_WLAN     (1ull | (2ull << 8) | (1ull << 10))     /* valid, SH outer, AF, AttrIndx 0 (NC) */
++#define TBL_DESC        (3ull)                                  /* next-level table */
++
++static uint64_t wlan_arena_pa, wlan_arena_size;
++static int wlan_bank = -1;
++
++int
++sweet_smmu_wlan_setup(uint64_t arena_pa, size_t arena_size)
++{
++	int error = EIO;
++	vm_offset_t l1v = 0, l2v = 0;
++	uint64_t l1_pa, l2_pa, l3_pa[4] = { 0 };
++	vm_offset_t l3v[4] = { 0 };
++	unsigned nl3, ncb, ns2cb, nsmr, pgshift, cb0, gr1;
++
++	if (arena_pa & 0xfffull || arena_size == 0 || arena_size > (4ull << 20) * 4 ||
++	    (arena_size & 0x1fffffull)) {
++		return EINVAL;          /* must be 4 KiB aligned, <= 8 MiB, whole 2 MiB L2 entries */
++	}
++	if (__atomic_exchange_n(&smmu_lock, 1, __ATOMIC_ACQUIRE)) {
++		return EBUSY;
++	}
++	if (smmu_base == 0) {
++		smmu_base = ml_io_map(SMMU_PA, SMMU_SIZE);
++		if (smmu_base == 0) {
++			printf("SWEET SMMU: wlan: map failed\n");
++			goto out;
++		}
++	}
++	uint32_t id0 = smmu_rd(0x20), id1 = smmu_rd(0x24);
++	pgshift = (id1 >> 31) ? 16 : 12;
++	ncb = id1 & 0xff;
++	ns2cb = (id1 >> 16) & 0xff;
++	gr1 = 1u << pgshift;
++	cb0 = (1u << (((id1 >> 28) & 7) + 1)) << pgshift;
++	nsmr = id0 & 0xff;
++	if (pgshift != 12) {
++		printf("SWEET SMMU: wlan: %u-byte SMMU page not supported here\n", 1u << pgshift);
++		error = ENODEV;
++		goto out;
++	}
++	nl3 = (unsigned)(arena_size >> 21);
++
++	/* free bank: no translating SMR points at it and it reads disabled */
++	uint32_t used[8] = { 0 };
++	for (unsigned i = 0; i < nsmr && i < 128; i++) {
++		uint32_t smr = smmu_rd(0x800 + 4 * i), s2cr = smmu_rd(0xc00 + 4 * i);
++		if ((smr & (1u << 31)) && ((s2cr >> 16) & 3) == 0) {
++			used[(s2cr & 0xff) / 32] |= 1u << ((s2cr & 0xff) % 32);
++		}
++	}
++	int bank = -1;
++	for (unsigned c = ns2cb; c < ncb; c++) {
++		if (!(used[c / 32] & (1u << (c % 32))) && !(smmu_rd(cb0 + (c << pgshift)) & 1)) {
++			bank = (int)c;
++			break;
++		}
++	}
++	if (bank < 0) {
++		printf("SWEET SMMU: wlan: no free context bank\n");
++		error = ENODEV;
++		goto out;
++	}
++
++	if (kmem_alloc_contig(kernel_map, &l1v, L1_SIZE, PAGE_MASK, 0, 0,
++	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		error = ENOMEM;
++		goto out;
++	}
++	if (kmem_alloc_contig(kernel_map, &l2v, L1_SIZE, PAGE_MASK, 0, 0,
++	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		error = ENOMEM;
++		goto out;
++	}
++	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)l1v);
++	if (!pn) {
++		error = ENOMEM;
++		goto out;
++	}
++	l1_pa = ptoa_64(pn);
++	pn = pmap_find_phys(kernel_pmap, (addr64_t)l2v);
++	if (!pn) {
++		error = ENOMEM;
++		goto out;
++	}
++	l2_pa = ptoa_64(pn);
++
++	volatile uint64_t *l1 = (volatile uint64_t *)l1v, *l2 = (volatile uint64_t *)l2v;
++	unsigned l1i = (unsigned)(WLAN_IOVA_BASE >> 30), l2i = (unsigned)((WLAN_IOVA_BASE >> 21) & 0x1ff);
++	if (l1i >= 512 || l2i + nl3 > 512) {
++		error = EINVAL;
++		goto out;
++	}
++	l1[l1i] = l2_pa | TBL_DESC;
++	for (unsigned j = 0; j < nl3; j++) {
++		if (kmem_alloc_contig(kernel_map, &l3v[j], L1_SIZE, PAGE_MASK, 0, 0,
++		    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++			error = ENOMEM;
++			goto out;
++		}
++		ppnum_t p3 = pmap_find_phys(kernel_pmap, (addr64_t)l3v[j]);
++		if (!p3) {
++			error = ENOMEM;
++			goto out;
++		}
++		l3_pa[j] = ptoa_64(p3);
++		l2[l2i + j] = l3_pa[j] | TBL_DESC;
++		volatile uint64_t *l3 = (volatile uint64_t *)l3v[j];
++		for (unsigned k = 0; k < 512; k++) {
++			uint64_t pa = arena_pa + ((uint64_t)j << 21) + ((uint64_t)k << 12);
++			l3[k] = pa | PTE_4K_WLAN;
++		}
++		sweet_dma_sync_va((const void *)l3v[j], L1_SIZE);
++	}
++	sweet_dma_sync_va((const void *)l1v, L1_SIZE);
++	sweet_dma_sync_va((const void *)l2v, L1_SIZE);
++	flush_dcache64((addr64_t)l1_pa, L1_SIZE, TRUE);
++	flush_dcache64((addr64_t)l2_pa, L1_SIZE, TRUE);
++
++	uint32_t cb = cb0 + ((uint32_t)bank << pgshift);
++	unsigned asid = (unsigned)bank;
++	smmu_wr(cb + 0x0, 0);
++	smmu_wr(cb + 0x58, 0xffffffffu);                        /* FSR clear */
++	smmu_wr(gr1 + 0x800 + 4 * (unsigned)bank, 1);           /* CBA2R VA64 */
++	smmu_wr(gr1 + 4 * (unsigned)bank, 0x1f000u);             /* CBAR: S1 translate, S2 bypass, memattr 0xf */
++	smmu_wr(cb + 0x10, 7u << 15 | 1);                        /* TCR2: SEP upstream, PA 40-bit */
++	smmu_wr(cb + 0x30, 25 | 1u << 23);                       /* TCR: T0SZ 25 (39-bit VA), 4K, NC walks, EPD1 */
++	smmu_wr(cb + 0x34, asid);                                /* CONTEXTIDR */
++	smmu_wr64(cb + 0x20, l1_pa | (uint64_t)asid << 48);      /* TTBR0 */
++	smmu_wr64(cb + 0x28, 0);
++	smmu_wr(cb + 0x38, 0x44);                                /* MAIR0 attr0 Normal NC */
++	smmu_wr(cb + 0x618, 0);                                  /* TLBIALL */
++	smmu_wr(cb + 0x7f0, 0);                                  /* TLBSYNC */
++	for (int t = 0; t < 100000 && (smmu_rd(cb + 0x7f4) & 1); t++) {
++		delay(1);
++	}
++	smmu_wr(cb + 0x0, 1u << 6 | 1u << 5 | 1u << 2 | 1u << 1 | 1);   /* CFIE CFRE AFE TRE M */
++	if (!(smmu_rd(cb + 0x0) & 1) ||
++	    smmu_rd(gr1 + 4 * (unsigned)bank) != 0x1f000u ||
++	    smmu_rd(cb + 0x30) != (25u | 1u << 23) ||
++	    smmu_rd(cb + 0x20) != (uint32_t)(l1_pa | (uint64_t)asid << 48)) {
++		printf("SWEET SMMU: wlan: bank %d did not take (SCTLR %#x CBAR %#x TCR %#x TTBR0 %#x)\n",
++		    bank, smmu_rd(cb + 0x0), smmu_rd(gr1 + 4 * (unsigned)bank),
++		    smmu_rd(cb + 0x30), smmu_rd(cb + 0x20));
++		error = EIO;
++		goto out;
++	}
++
++	/* point the two WLAN streams at this bank */
++	static const unsigned sids[2] = { 0x640, 0x641 };
++	int free_smr = -1;
++	for (unsigned s = 0; s < sizeof(sids) / sizeof(sids[0]); s++) {
++		unsigned sid = sids[s];
++		int match = -1;
++		for (unsigned i = 0; i < nsmr && i < 128; i++) {
++			uint32_t smr = smmu_rd(0x800 + 4 * i);
++			if (!(smr & (1u << 31))) {
++				if (free_smr < 0 && (int)i >= smmu_next_smr) {
++					free_smr = (int)i;
++				}
++				continue;
++			}
++			uint32_t mask = (smr >> 16) & 0x7fff;
++			if (((smr ^ sid) & ~mask & 0x7fff) == 0 && match < 0) {
++				match = (int)i;
++			}
++		}
++		int slot;
++		if (match >= 0) {
++			uint32_t smr = smmu_rd(0x800 + 4 * (unsigned)match);
++			if ((smr >> 16) & 0x7fff) {
++				printf("SWEET SMMU: wlan: sid %#x matched by masked smr %d; not repointed\n",
++				    sid, match);
++				error = EEXIST;
++				goto out;
++			}
++			slot = match;
++			smmu_wr(0xc00 + 4 * (unsigned)slot, (uint32_t)bank);      /* S2CR translate */
++		} else {
++			if (free_smr < 0) {
++				printf("SWEET SMMU: wlan: no free SMR for sid %#x\n", sid);
++				error = ENOSPC;
++				goto out;
++			}
++			slot = free_smr;
++			smmu_wr(0xc00 + 4 * (unsigned)slot, (uint32_t)bank);
++			smmu_wr(0x800 + 4 * (unsigned)slot, 1u << 31 | (sid & 0x7fff));
++			smmu_next_smr = slot + 1;
++			free_smr = -1;
++		}
++		uint32_t rs2cr = smmu_rd(0xc00 + 4 * (unsigned)slot), rsmr = smmu_rd(0x800 + 4 * (unsigned)slot);
++		if (((rs2cr >> 16) & 3) != 0 || (rs2cr & 0xff) != (uint32_t)bank || !(rsmr & (1u << 31)) ||
++		    (rsmr & 0x7fff) != sid) {
++			printf("SWEET SMMU: wlan: sid %#x refused (SMR %#x S2CR %#x)\n", sid, rsmr, rs2cr);
++			error = EIO;
++			goto out;
++		}
++	}
++
++	wlan_bank = bank;
++	wlan_arena_pa = arena_pa;
++	wlan_arena_size = arena_size;
++	printf("SWEET SMMU: wlan: bank %d, iova %#llx..%#llx -> pa %#llx, ttbr0 %#llx, sid 0x640/0x641 translate\n",
++	    bank, (unsigned long long)WLAN_IOVA_BASE,
++	    (unsigned long long)(WLAN_IOVA_BASE + arena_size),
++	    (unsigned long long)arena_pa, (unsigned long long)l1_pa);
++	error = 0;
++out:
++	__atomic_store_n(&smmu_lock, 0, __ATOMIC_RELEASE);
++	return error;
++}
++
++/* The arena the WLAN bank translates, for /dev/wlan's FW_IOCTL_DMA_ARENA. */
++int
++sweet_smmu_wlan_info(uint64_t *pa, uint64_t *iova, uint64_t *size)
++{
++	if (wlan_bank < 0) {
++		return ENXIO;
++	}
++	*pa = wlan_arena_pa;
++	*iova = WLAN_IOVA_BASE;
++	*size = wlan_arena_size;
++	return 0;
++}
++
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 index 27caa07..b052a5a 100644
 --- a/bsd/dev/sweet_ufs.c
@@ -2966,10 +3279,10 @@ index 27caa07..b052a5a 100644
  }
 diff --git a/bsd/sys/flame_wlan.h b/bsd/sys/flame_wlan.h
 new file mode 100644
-index 0000000..6f48588
+index 0000000..2ce7ab9
 --- /dev/null
 +++ b/bsd/sys/flame_wlan.h
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,86 @@
 +/*
 + * /dev/wlan: the kernel's Wi-Fi station (bsd/dev/flame_wlan.c, under en0 and wifid's Apple80211 requests,
 + * ios-topaz 0900's redwood code) and the radio, which runs in userland (phone/wifi: wland). The same file is
@@ -2985,6 +3298,19 @@ index 0000000..6f48588
 +
 +/* wland -> kernel: does the WLAN SMMU stream exist? out: uint32_t, 1 = translating */
 +#define FW_IOCTL_SMMU_STATUS    _IOR('W', 1, uint32_t)
++
++/*
++ * wland -> kernel: the WLAN DMA arena. Kernel-owned physical memory mapped at
++ * low WLAN IOVAs by the dedicated apps-SMMU bank; the offset is identical in
++ * both addresses (cpu_pa + off / iova + off). Root only; ENXIO when DMA setup
++ * failed, in which case the radio must not start.
++ */
++struct fw_dma_arena {
++	uint64_t pa;		/* CPU physical base (for /dev/pmem) */
++	uint64_t iova;		/* device address base (for descriptors/rings) */
++	uint64_t size;		/* bytes, 4 KiB aligned */
++};
++#define FW_IOCTL_DMA_ARENA      _IOR('W', 2, struct fw_dma_arena)
 +
 +struct fw_hdr {
 +	uint16_t type;

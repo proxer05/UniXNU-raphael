@@ -30,7 +30,8 @@ def added(text):
 
 class KernelPatchTests(unittest.TestCase):
     def test_exact_source_scope(self):
-        expected = {'bsd/conf/files', 'bsd/dev/sweet_ufs.c', 'iokit/conf/files.arm64'}
+        expected = {'bsd/conf/files', 'bsd/dev/sweet_ufs.c', 'bsd/dev/sweet_smmu.c',
+                    'iokit/conf/files.arm64'}
         expected.update('bsd/dev/' + name for name in BSD_FILES)
         expected.update('bsd/sys/' + name for name in HEADERS)
         expected.update('iokit/Kernel/arm/' + name for name in IOKIT_FILES)
@@ -85,6 +86,29 @@ class KernelPatchTests(unittest.TestCase):
         self.assertIn('kauth_cred_issuser(kauth_cred_get())', parts['bsd/dev/sweet_pmem.c'])
         self.assertIn('kauth_cred_issuser(kauth_cred_get())', parts['bsd/dev/flame_wlan.c'])
         # pm_rw and PMEM_SMC are intentionally NOT blocked: wland needs them for radio bring-up
+
+    def test_wlan_dma_is_kernel_owned(self):
+        parts = sections()
+        smmu = '\n'.join(added(parts['bsd/dev/sweet_smmu.c']))
+        self.assertIn('sweet_smmu_wlan_setup', smmu)
+        self.assertIn('sweet_smmu_wlan_info', smmu)
+        self.assertIn('WLAN_IOVA_BASE  0xa0000000ull', smmu)      # raphael DT smmu_iova_base
+        self.assertIn('S1 translate', smmu)
+        wlan = '\n'.join(added(parts['bsd/dev/flame_wlan.c']))
+        self.assertIn('FW_IOCTL_DMA_ARENA', wlan)
+        self.assertIn('kmem_alloc_contig', wlan)
+        self.assertIn('sweet_smmu_wlan_setup', wlan)
+        header = '\n'.join(added(parts['bsd/sys/flame_wlan.h']))
+        self.assertIn('struct fw_dma_arena', header)
+        self.assertIn('FW_IOCTL_DMA_ARENA', header)
+        # the radio must not assume any physical pool any more
+        pmem = '\n'.join(added(parts['bsd/dev/sweet_pmem.c']))
+        self.assertIn('sweet_dma_sync_va', pmem)
+
+    def test_no_reserved_memory_pool(self):
+        text = PATCH.read_text()
+        for value in ('0x8a000000', '0x8A000000', '0xE0000000', '0xe0000000'):
+            self.assertNotIn(value, text)
 
 
 if __name__ == '__main__':
