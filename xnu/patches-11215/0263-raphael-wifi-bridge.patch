@@ -273,10 +273,10 @@ index 0000000..72b205c
 +}
 diff --git a/bsd/dev/flame_wlan.c b/bsd/dev/flame_wlan.c
 new file mode 100644
-index 0000000..6324ac9
+index 0000000..3a4eafa
 --- /dev/null
 +++ b/bsd/dev/flame_wlan.c
-@@ -0,0 +1,566 @@
+@@ -0,0 +1,572 @@
 +/*
 + * flame: the WCN3990 radio for the kernel's Wi-Fi station. bsd/dev/flame_sta.c (ios-topaz 0900's topaz_sta.c)
 + * puts en0 and wifid's Apple80211 requests (bsd/dev/redwood_*.c) on this file's flame_wlan_* C API, the one
@@ -757,6 +757,7 @@ index 0000000..6324ac9
 +extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
 +extern int sweet_smmu_wlan_setup(uint64_t arena_pa, size_t arena_size);
 +extern int sweet_smmu_wlan_info(uint64_t *pa, uint64_t *iova, uint64_t *size);
++extern int sweet_smmu_wlan_faults(uint32_t *fsr, uint32_t *fsynr0, uint32_t *far_lo, uint32_t *far_hi);
 +static int fw_smmu_ok;
 +static uint64_t fw_dma_pa, fw_dma_iova, fw_dma_size;
 +static vm_offset_t fw_dma_va;
@@ -782,6 +783,11 @@ index 0000000..6324ac9
 +		a->iova = fw_dma_iova;
 +		a->size = fw_dma_size;
 +		return 0;
++	case FW_IOCTL_SMMU_FAULT: {
++		struct fw_smmu_fault *f = (struct fw_smmu_fault *)data;
++		int e = sweet_smmu_wlan_faults(&f->fsr, &f->fsynr0, &f->far_lo, &f->far_hi);
++		return e;
++	}
 +	default:
 +		return ENOTTY;
 +	}
@@ -3004,7 +3010,7 @@ index 2d88a34..40e5ec1 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_smmu.c b/bsd/dev/sweet_smmu.c
-index d7dc290..a989d08 100644
+index d7dc290..28228fe 100644
 --- a/bsd/dev/sweet_smmu.c
 +++ b/bsd/dev/sweet_smmu.c
 @@ -38,6 +38,8 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
@@ -3016,7 +3022,7 @@ index d7dc290..a989d08 100644
  
  #define SMMU_PA         0x15000000u     /* apps_smmu */
  #define SMMU_SIZE       0x100000u
-@@ -311,4 +313,249 @@ out:
+@@ -311,4 +313,284 @@ out:
  	__atomic_store_n(&smmu_lock, 0, __ATOMIC_RELEASE);
  	return result;
  }
@@ -3036,11 +3042,13 @@ index d7dc290..a989d08 100644
 + * are pointed at it with translating S2CR entries.
 + */
 +#define WLAN_IOVA_BASE  0xa0000000ull   /* DT: icnss smmu_iova_base */
-+#define PTE_4K_WLAN     (1ull | (2ull << 8) | (1ull << 10))     /* valid, SH outer, AF, AttrIndx 0 (NC) */
++/* level-3 descriptors must be 0b11 (page); 0b01 is reserved at L3 and faults */
++#define PTE_4K_WLAN     (3ull | (2ull << 8) | (1ull << 6) | (1ull << 10)) /* page, SH outer, AP EL0 RW, AF, AttrIndx 0 (NC) */
 +#define TBL_DESC        (3ull)                                  /* next-level table */
 +
 +static uint64_t wlan_arena_pa, wlan_arena_size;
 +static int wlan_bank = -1;
++static uint32_t wlan_cb_reg;            /* context bank register block in smmu_base */
 +
 +int
 +sweet_smmu_wlan_setup(uint64_t arena_pa, size_t arena_size)
@@ -3164,8 +3172,8 @@ index d7dc290..a989d08 100644
 +	smmu_wr(cb + 0x0, 0);
 +	smmu_wr(cb + 0x58, 0xffffffffu);                        /* FSR clear */
 +	smmu_wr(gr1 + 0x800 + 4 * (unsigned)bank, 1);           /* CBA2R VA64 */
-+	smmu_wr(gr1 + 4 * (unsigned)bank, 0x1f000u);             /* CBAR: S1 translate, S2 bypass, memattr 0xf */
-+	smmu_wr(cb + 0x10, 7u << 15 | 1);                        /* TCR2: SEP upstream, PA 40-bit */
++	smmu_wr(gr1 + 4 * (unsigned)bank, 0x1f300u);             /* CBAR: S1 translate, S2 bypass (same bits as the identity bank) */
++	smmu_wr(cb + 0x10, 7u << 15 | 2);                        /* TCR2: SEP upstream, PA 40-bit (identity bank) */
 +	smmu_wr(cb + 0x30, 25 | 1u << 23);                       /* TCR: T0SZ 25 (39-bit VA), 4K, NC walks, EPD1 */
 +	smmu_wr(cb + 0x34, asid);                                /* CONTEXTIDR */
 +	smmu_wr64(cb + 0x20, l1_pa | (uint64_t)asid << 48);      /* TTBR0 */
@@ -3178,12 +3186,25 @@ index d7dc290..a989d08 100644
 +	}
 +	smmu_wr(cb + 0x0, 1u << 6 | 1u << 5 | 1u << 2 | 1u << 1 | 1);   /* CFIE CFRE AFE TRE M */
 +	if (!(smmu_rd(cb + 0x0) & 1) ||
-+	    smmu_rd(gr1 + 4 * (unsigned)bank) != 0x1f000u ||
++	    smmu_rd(gr1 + 4 * (unsigned)bank) != 0x1f300u ||
 +	    smmu_rd(cb + 0x30) != (25u | 1u << 23) ||
 +	    smmu_rd(cb + 0x20) != (uint32_t)(l1_pa | (uint64_t)asid << 48)) {
 +		printf("SWEET SMMU: wlan: bank %d did not take (SCTLR %#x CBAR %#x TCR %#x TTBR0 %#x)\n",
 +		    bank, smmu_rd(cb + 0x0), smmu_rd(gr1 + 4 * (unsigned)bank),
 +		    smmu_rd(cb + 0x30), smmu_rd(cb + 0x20));
++		error = EIO;
++		goto out;
++	}
++	/* the walker reads what DRAM holds: verify the first and last leaf entries */
++	uint64_t exp0 = arena_pa | PTE_4K_WLAN;
++	uint64_t expN = (arena_pa + arena_size - 0x1000) | PTE_4K_WLAN;
++	if (((volatile uint64_t *)l3v[0])[0] != exp0 ||
++	    ((volatile uint64_t *)l3v[nl3 - 1])[511] != expN) {
++		printf("SWEET SMMU: wlan: leaf entries wrong (l3[0] %#llx exp %#llx, l3[last] %#llx exp %#llx)\n",
++		    (unsigned long long)((volatile uint64_t *)l3v[0])[0],
++		    (unsigned long long)exp0,
++		    (unsigned long long)((volatile uint64_t *)l3v[nl3 - 1])[511],
++		    (unsigned long long)expN);
 +		error = EIO;
 +		goto out;
 +	}
@@ -3240,6 +3261,7 @@ index d7dc290..a989d08 100644
 +	}
 +
 +	wlan_bank = bank;
++	wlan_cb_reg = cb;
 +	wlan_arena_pa = arena_pa;
 +	wlan_arena_size = arena_size;
 +	printf("SWEET SMMU: wlan: bank %d, iova %#llx..%#llx -> pa %#llx, ttbr0 %#llx, sid 0x640/0x641 translate\n",
@@ -3262,6 +3284,25 @@ index d7dc290..a989d08 100644
 +	*pa = wlan_arena_pa;
 +	*iova = WLAN_IOVA_BASE;
 +	*size = wlan_arena_size;
++	return 0;
++}
++
++/*
++ * The bank's last recorded fault, for /dev/wlan diagnosis after a device AXI
++ * error. FSR/FSYNR0 are the fault status/syndrome; FAR is 64-bit (FAR+4 high).
++ * Reading these registers is safe from the kernel (the hypervisor only blocks
++ * userland MMIO to this block).
++ */
++int
++sweet_smmu_wlan_faults(uint32_t *fsr, uint32_t *fsynr0, uint32_t *far_lo, uint32_t *far_hi)
++{
++	if (wlan_bank < 0 || smmu_base == 0) {
++		return ENXIO;
++	}
++	*fsr = smmu_rd(wlan_cb_reg + 0x58);
++	*fsynr0 = smmu_rd(wlan_cb_reg + 0x68);
++	*far_lo = smmu_rd(wlan_cb_reg + 0x60);
++	*far_hi = smmu_rd(wlan_cb_reg + 0x64);
 +	return 0;
 +}
 +
@@ -3290,10 +3331,10 @@ index 27caa07..b052a5a 100644
  }
 diff --git a/bsd/sys/flame_wlan.h b/bsd/sys/flame_wlan.h
 new file mode 100644
-index 0000000..2ce7ab9
+index 0000000..e97ff05
 --- /dev/null
 +++ b/bsd/sys/flame_wlan.h
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,95 @@
 +/*
 + * /dev/wlan: the kernel's Wi-Fi station (bsd/dev/flame_wlan.c, under en0 and wifid's Apple80211 requests,
 + * ios-topaz 0900's redwood code) and the radio, which runs in userland (phone/wifi: wland). The same file is
@@ -3322,6 +3363,15 @@ index 0000000..2ce7ab9
 +	uint64_t size;		/* bytes, 4 KiB aligned */
 +};
 +#define FW_IOCTL_DMA_ARENA      _IOR('W', 2, struct fw_dma_arena)
++
++/* wland -> kernel: the WLAN bank's last context fault (diagnosis after an AXI error) */
++struct fw_smmu_fault {
++	uint32_t fsr;		/* context fault status */
++	uint32_t fsynr0;	/* fault syndrome (access type) */
++	uint32_t far_lo;	/* fault address, low */
++	uint32_t far_hi;	/* fault address, high */
++};
++#define FW_IOCTL_SMMU_FAULT     _IOR('W', 3, struct fw_smmu_fault)
 +
 +struct fw_hdr {
 +	uint16_t type;
