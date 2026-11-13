@@ -127,6 +127,9 @@ static void bridge_link(int up)
 	l.up = (uint8_t)(up != 0);
 	l.ssid_len = (uint8_t)radio_ssid(l.ssid, l.bssid);
 	printf("[%6llu] bridge: link %s '%.*s'\n", (unsigned long long)link_ms(), up ? "up" : "down", l.ssid_len, l.ssid);
+	if (up)
+		last_bg_scan = link_ms();	/* wifid's first poll serves the cache; a real sweep
+		                                 * right after joining trips the beacon watchdog */
 	bridge_send(FW_LINK, &l, sizeof(l));
 }
 
@@ -224,6 +227,10 @@ static void on_join(const struct fw_join *j)
 		for (int i = 0; i < 32; i++)
 			snprintf(pass + 2 * i, 3, "%02x", j->key[i]);	/* radio_join takes the PMK as 64 hex digits */
 	}
+	if (getenv("WLAND_DEBUG"))
+		printf("[%6llu] bridge: join key (%s, %u bytes): %s\n", (unsigned long long)link_ms(),
+		       j->key_kind == FW_KEY_PMK ? "pmk" : j->key_kind == FW_KEY_PASSPHRASE ? "passphrase" : "open",
+		       j->key_len, pass[0] ? pass : "(none)");
 	if (radio_joined())
 		radio_disconnect();
 	int r = radio_join(ssid, pass);

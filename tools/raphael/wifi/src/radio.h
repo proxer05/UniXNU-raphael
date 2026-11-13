@@ -4,6 +4,9 @@
 
 /* The WLAN DMA stream (apps SMMU 0x640/0x1) through a translation-off bank; before the modem boots. 0 = ok. */
 int smmu_wlan_identity(void);
+/* Claim the kernel's WLAN DMA arena early: rmtfs's buffer comes out of it, before
+ * late pmem allocations of a few MB contiguous start failing on fragmented DRAM. */
+int radio_dma_early(void);
 int radio_start(void);		/* after WLFW mission mode: copy engines, HTC, then WMI/HTT/scan from radio_poll */
 void radio_poll(void);		/* called from the link's idle loop */
 void radio_summary(void);	/* the networks heard so far */

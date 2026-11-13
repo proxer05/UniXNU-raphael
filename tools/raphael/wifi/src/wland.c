@@ -540,7 +540,10 @@ static int boot_modem(void)
 	if (rc || r1)
 		return -1;
 
-	/* 5. wait for SMP2P in: "ready" (bit 1) from the modem */
+	/* 5. wait for SMP2P in: "ready" (bit 1) from the modem.
+	 * NOTE: no RMB/MBA register polling here — without Linux's MSS clock
+	 * preparation those reads hang the SoC even while the Q6 runs (proven
+	 * twice on raphael). The SMP2P state below is the diagnostic. */
 	for (int t = 0; t < 300; t++) {
 		uint32_t v;
 		smp2p_service();
@@ -733,7 +736,9 @@ static int net(unsigned secs)
 	signal(SIGPIPE, SIG_IGN);
 	signal(SIGUSR1, on_usr1);
 	signal(SIGCHLD, SIG_IGN);	/* netsvc children (ipnet.c) reap themselves */
-	if (link_up(net_cb, 5000)) {
+	/* 5 s was occasionally too short: the modem's IPCRTR opened late and wland exited
+	 * after the modem had booted; a second attach then ERR-FATALed it (2026-11-13). */
+	if (link_up(net_cb, 20000)) {
 		wland_console("wland: GLINK/QRTR link_up failed\n");
 		return -1;
 	}
@@ -781,8 +786,12 @@ static int net(unsigned secs)
 /* everything `up` does, from a fresh boot */
 static int up(unsigned secs)
 {
+	/* now safe: smmu_wlan_identity asks the kernel over /dev/wlan (ioctl),
+	 * no SMMU MMIO access from userland */
 	if (smmu_wlan_identity())
 		printf("up: no WLAN SMMU stream: the radio will not start\n");
+	/* before rmtfs: its buffer comes out of the kernel's WLAN DMA arena */
+	(void)radio_dma_early();
 	if (wlan_power() || smp2p_create())
 		return 1;
 	/* Pre-allocate GLINK rings, rmtfs 2 MB buffer + EFS fds, and TFTP dir BEFORE

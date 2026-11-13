@@ -94,13 +94,20 @@ class KernelPatchTests(unittest.TestCase):
         self.assertIn('sweet_smmu_wlan_info', smmu)
         self.assertIn('WLAN_IOVA_BASE  0xa0000000ull', smmu)      # raphael DT smmu_iova_base
         self.assertIn('S1 translate', smmu)
+        # a level-3 entry must be a page descriptor (0b11): 0b01 is reserved there
+        # and made the firmware report AXI_ERROR_DETECTED on the first CE access
+        self.assertIn('3ull | (2ull << 8) | (1ull << 6) | (1ull << 10)', smmu)
+        self.assertIn('sweet_smmu_wlan_faults', smmu)             # post-mortem on a CE AXI error
         wlan = '\n'.join(added(parts['bsd/dev/flame_wlan.c']))
         self.assertIn('FW_IOCTL_DMA_ARENA', wlan)
+        self.assertIn('FW_IOCTL_SMMU_FAULT', wlan)
         self.assertIn('kmem_alloc_contig', wlan)
         self.assertIn('sweet_smmu_wlan_setup', wlan)
         header = '\n'.join(added(parts['bsd/sys/flame_wlan.h']))
         self.assertIn('struct fw_dma_arena', header)
         self.assertIn('FW_IOCTL_DMA_ARENA', header)
+        self.assertIn('struct fw_smmu_fault', header)
+        self.assertIn('FW_IOCTL_SMMU_FAULT', header)
         # the radio must not assume any physical pool any more
         pmem = '\n'.join(added(parts['bsd/dev/sweet_pmem.c']))
         self.assertIn('sweet_dma_sync_va', pmem)

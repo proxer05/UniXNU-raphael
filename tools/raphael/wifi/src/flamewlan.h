@@ -27,6 +27,15 @@ struct fw_dma_arena {
 };
 #define FW_IOCTL_DMA_ARENA      _IOR('W', 2, struct fw_dma_arena)
 
+/* wland -> kernel: the WLAN bank's last context fault (diagnosis after an AXI error) */
+struct fw_smmu_fault {
+	uint32_t fsr;		/* context fault status */
+	uint32_t fsynr0;	/* fault syndrome (access type) */
+	uint32_t far_lo;	/* fault address, low */
+	uint32_t far_hi;	/* fault address, high */
+};
+#define FW_IOCTL_SMMU_FAULT     _IOR('W', 3, struct fw_smmu_fault)
+
 struct fw_hdr {
 	uint16_t type;
 	uint16_t len;			/* of the payload after the header */

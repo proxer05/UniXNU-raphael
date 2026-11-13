@@ -20,12 +20,13 @@
 #include <sys/time.h>
 #include "link.h"
 #include "pmem.h"
+#include "radio_dma.h"
 #include "qmi.h"
 #include "rmtfs.h"
 #include "scm.h"
 
 #define RMTFS_DIR	"/var/local/fw/rmtfs"
-#define BUF_EFS_SIZE	0x200000u
+#define BUF_EFS_SIZE	0x400000u	/* the modem asks for 3 MiB (2 MiB rejected -> ERR-FATAL) */
 #define BUF_OEM_SIZE	0x100000u
 #define BUF_TOTAL_SIZE	(BUF_EFS_SIZE + BUF_OEM_SIZE)
 #define BUF_VERSION	5u
@@ -347,9 +348,16 @@ int rmtfs_prepare(void)
 		printf("rmtfs: buffer %llx (v%u, %x bytes) from this boot's first run\n",
 		       (unsigned long long)buf_pa, fver, BUF_TOTAL_SIZE);
 	} else {
-		uint64_t a = pm_alloc(BUF_TOTAL_SIZE + 0x2000, 0x1000);
-		if (!a)
-			return -1;
+		/* the kernel's WLAN DMA arena was allocated at boot and never
+		 * fragments; a late pmem allocation of 5 MB contiguous often does */
+		uint64_t da = 0, a = 0;
+		if (rdma_alloc(BUF_TOTAL_SIZE + 0x2000, 0x1000, &a, &da) != 0) {
+			a = pm_alloc(BUF_TOTAL_SIZE + 0x2000, 0x1000);
+			if (!a) {
+				fprintf(stderr, "rmtfs: no memory for the buffer\n");
+				return -1;
+			}
+		}
 		buf_pa = a + 0x1000;
 		static const uint32_t src[] = { VMID_HLOS }, dst[] = { VMID_HLOS, VMID_MSS_MSA };
 		if (hyp_assign(buf_pa, BUF_TOTAL_SIZE, src, 1, dst, 2))

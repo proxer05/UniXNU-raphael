@@ -40,6 +40,13 @@ main(void)
 	check(FW_IOCTL_DMA_ARENA == 0x40185702ul, "FW_IOCTL_DMA_ARENA Darwin number");
 	check(FW_IOCTL_SMMU_STATUS == 0x40045701ul, "FW_IOCTL_SMMU_STATUS Darwin number");
 
+	/* SMMU fault report: four 32-bit registers, no padding */
+	check(sizeof(struct fw_smmu_fault) == 16, "fw_smmu_fault is 16 bytes");
+	check(offsetof(struct fw_smmu_fault, fsr) == 0 && offsetof(struct fw_smmu_fault, fsynr0) == 4
+	      && offsetof(struct fw_smmu_fault, far_lo) == 8 && offsetof(struct fw_smmu_fault, far_hi) == 12,
+	      "fw_smmu_fault field order");
+	check(FW_IOCTL_SMMU_FAULT == 0x40105703ul, "FW_IOCTL_SMMU_FAULT Darwin number");
+
 	/* a message frames exactly: header then len payload bytes */
 	uint8_t buf[FW_MSG_MAX];
 	struct fw_hdr h = { .type = FW_JOIN, .len = sizeof(struct fw_join) };

@@ -31,6 +31,11 @@
 #include "radio.h"
 
 #define LOG(fmt, ...)	printf("[%6llu] radio: " fmt "\n", (unsigned long long)link_ms(), ##__VA_ARGS__)
+static int dbg_on = -1;
+#define DBG(fmt, ...)	do { \
+	if (dbg_on < 0) dbg_on = getenv("WLAND_DEBUG") != NULL; \
+	if (dbg_on) LOG("DBG " fmt, ##__VA_ARGS__); \
+} while (0)
 #define MIN(a, b)	((a) < (b) ? (a) : (b))
 
 const uint8_t radio_mac[6] = { 0x02, 0x50, 0x49, 0x58, 0x45, 0x4c };	/* what WLFW was given (wlfw.c) */
@@ -73,6 +78,9 @@ static int radio_dma_acquire(void)
 	done = 1;
 	return 0;
 }
+
+/* the arena must be claimed before rmtfs takes its buffer out of it */
+int radio_dma_early(void) { return radio_dma_acquire(); }
 
 /* pmem device accesses are 32-bit: lengths round up to 4 */
 static void mem_rd(uint64_t pa, void *buf, uint32_t len)
@@ -385,6 +393,11 @@ static int ce_send(uint32_t c, const void *data, uint32_t len, uint32_t transfer
 		return -1;
 	struct ce_state *s = &ce[c];
 	uint32_t mask = s->src_n - 1, sw = rd32(rri_pa + 4 * c) & 0xffff;
+	static uint32_t prev_rri[CE_COUNT], prev_wr[CE_COUNT];
+	DBG("ce%u: submit slot %u (rri %u prev %u, wr %u prev %u)", c, s->src_wr, sw,
+	    prev_rri[c], s->src_wr, prev_wr[c]);
+	prev_rri[c] = sw;
+	prev_wr[c] = s->src_wr;
 	if (((sw - 1 - s->src_wr) & mask) == 0 || ((s->src_wr - sw) & mask) >= ce_tx_slots(c) - 1) {
 		s->tx_full++;
 		return -1;
@@ -787,7 +800,7 @@ struct bss {
 static struct bss bss[NBSS];
 static uint32_t nbss, scans, scan_frames;
 static int scan_started, scanning;
-static uint64_t next_scan_ms;
+static uint64_t next_scan_ms, scan_started_ms;
 static int scan_asked;
 
 static int chan_is_passive(uint32_t f)
@@ -870,6 +883,7 @@ static void scan_start(void)
 	memcpy(c, radio_mac, 6);
 	int b = wmi_send(CMD_VDEV_CREATE, v, sizeof(v));
 	scanning = !scan_send_start();
+	scan_started_ms = link_ms();
 	LOG("scan: channel list (%u) %s, vdev %s, active scan %s", NFREQ, a ? "FAILED" : "ok", b ? "FAILED" : "ok",
 	    scanning ? "requested" : "FAILED");
 }
@@ -1380,12 +1394,19 @@ static int crypto_selftest(void)
 	static const uint8_t pt[16] = { 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
 					0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff };
 	static const uint8_t pmk_ref[4] = { 0xf4, 0x2c, 0x6f, 0xc5 };	/* "password"/"IEEE" (802.11 annex) */
+	static const uint8_t hmac_ref[16] = { 0xde, 0x7c, 0x9b, 0x85, 0xb8, 0xb7, 0x8a, 0xa6,
+					      0xbc, 0x8a, 0x7a, 0x36, 0xf7, 0x0a, 0x90, 0x70 };
 	uint8_t out[16], pmk[32];
 	int a = aes_unwrap(kek, ct, 24, out) && !memcmp(out, pt, 16);
 	pbkdf2_pmk("password", 8, (const uint8_t *)"IEEE", 4, pmk);
 	int b = !memcmp(pmk, pmk_ref, 4);
-	LOG("wpa: crypto self-test: key unwrap %s, pbkdf2 %s", a ? "ok" : "FAILED", b ? "ok" : "FAILED");
-	return a && b;
+	/* CCHmac with the wrong algorithm constant ran HMAC-MD5 and every 4-way MIC
+	 * was rejected (kCCHmacAlgSHA1 is 0 in Apple's enum, not 1); pin it */
+	hmac_sha1((const uint8_t *)"key", 3, (const uint8_t *)"The quick brown fox jumps over the lazy dog", 43, out);
+	int c = !memcmp(out, hmac_ref, 16);
+	LOG("wpa: crypto self-test: key unwrap %s, pbkdf2 %s, hmac-sha1 %s", a ? "ok" : "FAILED",
+	    b ? "ok" : "FAILED", c ? "ok" : "FAILED");
+	return a && b && c;
 }
 
 /* ---- HTT data TX */
@@ -1407,6 +1428,8 @@ static int htt_tx_frame(const uint8_t *f, uint32_t len, int clear)
 	mem_wr(pa, f, len);
 	uint32_t lo = (uint32_t)da;			/* frags[0] at +24: paddr_lo, paddr_hi16, len16 */
 	uint16_t hi = (uint16_t)(da >> 32), l16 = (uint16_t)len;
+	DBG("htt tx: slot %u frame da %llx bank %llx ext lo %08x hi %04x len %u", id,
+	    (unsigned long long)da, (unsigned long long)htt_bank_dma, lo, hi, l16);
 	memcpy(ext + 24, &lo, 4);
 	memcpy(ext + 28, &hi, 2);
 	memcpy(ext + 30, &l16, 2);
@@ -1432,8 +1455,16 @@ static void htt_tx_compl(const uint8_t *p, uint32_t len)
 	for (uint32_t i = 0; i < n && 4 + 2 * (i + 1) <= len; i++) {
 		uint16_t id;
 		memcpy(&id, p + 4 + 2 * i, 2);
-		if (id < TX_SLOTS)
+		if (id < TX_SLOTS) {
+			if (st != 0) {
+				uint8_t f[12];
+				mem_rd(tx_pool_pa + (uint64_t)id * TX_SLOT_SIZE, f, sizeof(f));
+				DBG("tx compl id %u status %u: %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
+				    id, st, f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7],
+				    f[8], f[9], f[10], f[11]);
+			}
 			tx_busy &= ~(1ull << id);
+		}
 	}
 	tx_done += n;
 	if (st != 0 && (tx_fail += n) <= 8)
@@ -1646,6 +1677,11 @@ static int w_tx_ether(const uint8_t *e, uint32_t len, int clear)
 	memcpy(f + 24, snap, 6);
 	memcpy(f + 30, e + 12, 2);			/* ethertype */
 	memcpy(f + 32, e + 14, len - 14);
+	DBG("tx frame len %u:", len - 14 + 32);
+	for (uint32_t o = 0; o < len - 14 + 32; o += 8) {
+		DBG("  %04x: %02x%02x%02x%02x %02x%02x%02x%02x", o, f[o], f[o + 1], f[o + 2], f[o + 3],
+		    f[o + 4], f[o + 5], f[o + 6], f[o + 7]);
+	}
 	return htt_tx_frame(f, len - 14 + 32, clear);
 }
 
@@ -1881,6 +1917,13 @@ static void w_eapol_rx(const uint8_t *e, size_t elen)
 		}
 		s_replay = replay;
 		memcpy(s_anonce, k + 13, 32);
+		DBG("message 1: replay %llx anonce:", (unsigned long long)replay);
+		for (int q = 0; q < 32; q += 8)
+			DBG("  anonce[%02u] %02x%02x%02x%02x%02x%02x%02x%02x", q, s_anonce[q], s_anonce[q + 1],
+			    s_anonce[q + 2], s_anonce[q + 3], s_anonce[q + 4], s_anonce[q + 5], s_anonce[q + 6],
+			    s_anonce[q + 7]);
+		DBG("  pmk %02x%02x%02x%02x%02x%02x%02x%02x", s_pmk[0], s_pmk[1], s_pmk[2], s_pmk[3],
+		    s_pmk[4], s_pmk[5], s_pmk[6], s_pmk[7]);
 		arc4random_buf(s_snonce, 32);
 		uint8_t data[76];
 		const uint8_t *aa = s_bssid, *spa = radio_mac;
@@ -1960,6 +2003,7 @@ static void sta_poll(void)
 	uint64_t now = link_ms();
 	if (s_join_asked && !scanning && scan_started) {
 		s_join_asked = 0;
+		DBG("join begin (state %d, msg1s %u)", s_state, s_msg1s);
 		w_teardown();
 		w_join_begin();
 		return;
@@ -2127,15 +2171,22 @@ void radio_poll(void)
 	if (scan_started && !scanning && next_scan_ms && now >= next_scan_ms) {
 		next_scan_ms = 0;
 		if (s_state == S_IDLE && !s_join_asked)	/* scans leave the channel: never while joining or joined */
-			scanning = !scan_send_start();
+			{ scanning = !scan_send_start(); scan_started_ms = link_ms(); }
 	}
 	/* asked for (wifid, bridge.c): also while joined, as a background scan (the firmware rests on the home
 	 * channel between the others: min/max rest in scan_send_start), never in the middle of a join */
 	if (scan_asked && scan_started && !scanning && !s_join_asked && (s_state == S_IDLE || s_state == S_UP)) {
 		scan_asked = 0;
 		scanning = !scan_send_start();
+		scan_started_ms = link_ms();
 		if (s_state == S_UP)
 			LOG("scan: in the background (joined)");
+	}
+	if (scanning && scan_started_ms && now - scan_started_ms > 30000) {
+		/* a lost scan-done event (the link went away mid-sweep) must not wedge
+		 * the join path: scanning gates w_teardown/w_join_begin */
+		LOG("scan: no done event in 30 s, giving up on it");
+		scanning = 0;
 	}
 	sta_poll();
 }

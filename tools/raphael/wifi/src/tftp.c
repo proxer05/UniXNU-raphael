@@ -288,9 +288,14 @@ static void request(const struct qrtr_hdr *h, const uint8_t *d, uint32_t n, int 
 		printf("tftp: unlink \"%s\" (%s)%s", file, mode, unlink_rc < 0 ? " -> failed" : "");
 	} else {
 		x->fd = open_path(file, write);
-		struct stat st;
-		if (x->fd >= 0 && !fstat(x->fd, &st))
-			x->size = (uint64_t)st.st_size;
+		/* lseek(SEEK_END), not fstat: our hand-written struct stat layout is
+		 * not verified, and a wrong st_size echoed as tsize=0 makes the WLAN
+		 * PD reject the image (End of Transfer loop, then ERR-FATAL). */
+		if (x->fd >= 0) {
+			off_t end = lseek(x->fd, 0, SEEK_END);
+			x->size = end > 0 ? (uint64_t)end : 0;
+			lseek(x->fd, 0, SEEK_SET);
+		}
 		printf("tftp: %s \"%s\" (%s)%s", write ? "write" : "read", file, mode, x->fd < 0 ? " -> not found" : "");
 	}
 	while (o < end && *o) {
