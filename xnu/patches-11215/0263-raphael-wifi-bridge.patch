@@ -276,7 +276,7 @@ new file mode 100644
 index 0000000..c422cd0
 --- /dev/null
 +++ b/bsd/dev/flame_wlan.c
-@@ -0,0 +1,511 @@
+@@ -0,0 +1,513 @@
 +/*
 + * flame: the WCN3990 radio for the kernel's Wi-Fi station. bsd/dev/flame_sta.c (ios-topaz 0900's topaz_sta.c)
 + * puts en0 and wifid's Apple80211 requests (bsd/dev/redwood_*.c) on this file's flame_wlan_* C API, the one
@@ -713,6 +713,8 @@ index 0000000..c422cd0
 +	}
 +	return 0;
 +}
++
++static int fw_ioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p);
 +
 +static const struct cdevsw fw_cdevsw = {
 +	.d_open       = fw_open,
