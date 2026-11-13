@@ -273,10 +273,10 @@ index 0000000..72b205c
 +}
 diff --git a/bsd/dev/flame_wlan.c b/bsd/dev/flame_wlan.c
 new file mode 100644
-index 0000000..ba7808e
+index 0000000..6324ac9
 --- /dev/null
 +++ b/bsd/dev/flame_wlan.c
-@@ -0,0 +1,562 @@
+@@ -0,0 +1,566 @@
 +/*
 + * flame: the WCN3990 radio for the kernel's Wi-Fi station. bsd/dev/flame_sta.c (ios-topaz 0900's topaz_sta.c)
 + * puts en0 and wifid's Apple80211 requests (bsd/dev/redwood_*.c) on this file's flame_wlan_* C API, the one
@@ -815,6 +815,10 @@ index 0000000..ba7808e
 +				fw_dma_pa = ptoa_64(pn);
 +				fw_dma_size = FW_DMA_ARENA_SIZE;
 +				e = sweet_smmu_wlan_setup(fw_dma_pa, FW_DMA_ARENA_SIZE);
++				if (e == 0) {
++					/* the bank's DT IOVA window, not a physical address */
++					e = sweet_smmu_wlan_info(&fw_dma_pa, &fw_dma_iova, &fw_dma_size);
++				}
 +				if (e == 0) {
 +					sweet_dma_sync_va((const void *)fw_dma_va, FW_DMA_ARENA_SIZE);
 +				}
@@ -3000,7 +3004,7 @@ index 2d88a34..40e5ec1 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_smmu.c b/bsd/dev/sweet_smmu.c
-index d7dc290..c2ee7ad 100644
+index d7dc290..a989d08 100644
 --- a/bsd/dev/sweet_smmu.c
 +++ b/bsd/dev/sweet_smmu.c
 @@ -38,6 +38,8 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
@@ -3012,7 +3016,7 @@ index d7dc290..c2ee7ad 100644
  
  #define SMMU_PA         0x15000000u     /* apps_smmu */
  #define SMMU_SIZE       0x100000u
-@@ -311,4 +313,245 @@ out:
+@@ -311,4 +313,249 @@ out:
  	__atomic_store_n(&smmu_lock, 0, __ATOMIC_RELEASE);
  	return result;
  }
@@ -3047,9 +3051,9 @@ index d7dc290..c2ee7ad 100644
 +	vm_offset_t l3v[4] = { 0 };
 +	unsigned nl3, ncb, ns2cb, nsmr, pgshift, cb0, gr1;
 +
-+	if (arena_pa & 0xfffull || arena_size == 0 || arena_size > (4ull << 20) * 4 ||
++	if (arena_pa & 0xfffull || arena_size == 0 || arena_size > (8ull << 20) ||
 +	    (arena_size & 0x1fffffull)) {
-+		return EINVAL;          /* must be 4 KiB aligned, <= 8 MiB, whole 2 MiB L2 entries */
++		return EINVAL;          /* 4 KiB aligned, <= 8 MiB, whole 2 MiB L2 entries */
 +	}
 +	if (__atomic_exchange_n(&smmu_lock, 1, __ATOMIC_ACQUIRE)) {
 +		return EBUSY;
@@ -3074,6 +3078,10 @@ index d7dc290..c2ee7ad 100644
 +		goto out;
 +	}
 +	nl3 = (unsigned)(arena_size >> 21);
++	if (nl3 == 0 || nl3 > 4) {              /* l3_pa[]/l3v[] carry four 2 MiB chunks */
++		error = EINVAL;
++		goto out;
++	}
 +
 +	/* free bank: no translating SMR points at it and it reads disabled */
 +	uint32_t used[8] = { 0 };
