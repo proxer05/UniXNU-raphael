@@ -851,10 +851,10 @@ index 0000000..3a4eafa
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/redwood_apple80211.c b/bsd/dev/redwood_apple80211.c
 new file mode 100644
-index 0000000..8b3726a
+index 0000000..b5d0a1b
 --- /dev/null
 +++ b/bsd/dev/redwood_apple80211.c
-@@ -0,0 +1,809 @@
+@@ -0,0 +1,821 @@
 +/*
 + * Darwin-on-redwood: Apple80211, answered in the kernel.
 + *
@@ -1013,16 +1013,27 @@ index 0000000..8b3726a
 +};
 +
 +/* ASSOCIATE (20): 592 bytes; of what follows the key (the RSN element wifid built, flags) nothing is used */
++/* ASSOCIATE (20): 900 bytes (0x384) on iOS 18.7.8, 592 (0x250) on 16.5. Derived from
++ * IO80211's _Apple80211AssociateAsync (0x21040b3dc): version@0, mode@4 (u16, default 2),
++ * auth-ish u32s at 0x08/0x0c, ssid_length@0x10, ssid@0x14, key_length@0x40,
++ * key_cipher@0x44 (10 = passphrase as typed, 6 = 32-byte PMK parsed by
++ * _Apple80211ParseWPAPassword), key@0x4c, a 24-bit flag bitfield at 0x1d3 with the
++ * passphrase flag 0x20 at 0x1d8, bssid@0x200, the bss blacklist at 0x206 and an
++ * identity string at 0x248. Everything from 0x8c on is unread here. */
 +struct apple80211_assoc {
 +	uint32_t version;
-+	uint16_t mode, auth_lower, auth_upper, unused_0;
++	uint16_t mode;
++	uint32_t auth_lower, auth_upper;        /* written by the builder; only logged here */
 +	uint32_t ssid_length;
 +	uint8_t ssid[32];
-+	uint8_t bssid[6], unused_1[2];
-+	uint32_t key_version, key_length, key_cipher;   /* cipher 10: a passphrase as typed; 6: the key (from 64 hex digits) */
-+	uint16_t key_flags, key_index;
++	uint32_t unused_1[3];                   /* 0x34..0x3c */
++	uint32_t key_length;
++	uint32_t key_cipher;                    /* cipher 10: a passphrase as typed; 6: the key (from 64 hex digits) */
++	uint32_t unused_2;                      /* 0x48 */
 +	uint8_t key[64];
-+	uint8_t rest[0x250 - 0x88];
++	uint8_t rest[0x200 - 0x8c];
++	uint8_t bssid[6];
++	uint8_t tail[0x384 - 0x206];
 +};
 +
 +#define CIPHER_PMK              6
@@ -1046,8 +1057,9 @@ index 0000000..8b3726a
 +	uint8_t pad[3];
 +};
 +
-+_Static_assert(sizeof(struct apple80211_assoc) == 592 && offsetof(struct apple80211_assoc, key) == 0x48,
-+    "the association request as iOS 16.5 has it");
++_Static_assert(sizeof(struct apple80211_assoc) == 0x384 && offsetof(struct apple80211_assoc, ssid_length) == 0x10 &&
++    offsetof(struct apple80211_assoc, key) == 0x4c && offsetof(struct apple80211_assoc, bssid) == 0x200,
++    "the association request as iOS 18.7.8 builds it");
 +_Static_assert(sizeof(struct apple80211_link_changed) == 44 &&
 +    offsetof(struct apple80211_link_changed, rssi) == 0x04 &&
 +    offsetof(struct apple80211_link_changed, reason) == 0x08 &&
@@ -1430,12 +1442,12 @@ index 0000000..8b3726a
 +	struct redwood_sta_join *what;
 +	int error;
 +
-+	if (request->req_len < offsetof(struct apple80211_assoc, rest)) {
++	if (request->req_len < offsetof(struct apple80211_assoc, tail)) {
 +		return EINVAL;
 +	}
 +	asked = kalloc_data(sizeof(*asked), Z_WAITOK | Z_ZERO);
 +	what = kalloc_data(sizeof(*what), Z_WAITOK | Z_ZERO);
-+	if (asked == NULL || what == NULL || (error = copyin(request->req_data, asked, offsetof(struct apple80211_assoc, rest))) != 0) {
++	if (asked == NULL || what == NULL || (error = copyin(request->req_data, asked, offsetof(struct apple80211_assoc, tail))) != 0) {
 +		error = asked == NULL || what == NULL ? ENOMEM : error;
 +		goto out;
 +	}
@@ -1452,7 +1464,7 @@ index 0000000..8b3726a
 +	memcpy(what->bssid, asked->bssid, sizeof(what->bssid));
 +	if (asked->key_length == 0) {
 +		what->security = REDWOOD_STA_OPEN;
-+	} else if (asked->key_cipher == CIPHER_PASSPHRASE && asked->key_length >= 8 && asked->key_length <= 63) {
++	} else if (asked->key_cipher == CIPHER_PASSPHRASE && asked->key_length >= 8 && asked->key_length <= sizeof(what->passphrase)) {
 +		what->security = REDWOOD_STA_WPA2_PSK;
 +		what->passphrase_length = (uint8_t)asked->key_length;
 +		memcpy(what->passphrase, asked->key, asked->key_length);
