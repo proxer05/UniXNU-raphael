@@ -18,9 +18,11 @@ IO80211.framework (0x210418240: `cmp w2, #0x2c`; field reads at 0x0, 0x4, 0x8,
 
 ## Verdict
 
-The donor's existing kernel layouts work as-is on iOS 18.7.8. The ABI blocker is
-resolved; remaining work is DMA pool ownership, `wland` runtime validation, and
-firmware/NV policy review.
+The donor's existing kernel layouts work as-is on iOS 18.7.8 — except
+`apple80211_scan_request`, which iOS 18.7.8 grows from 5456 to 5528 bytes with
+all field offsets unchanged (resolved 2026-11-13, table below). The remaining
+unknown is `apple80211_scan_result`: the kernel controls the size the framework
+probes for, but its per-field reader offsets are still 16.5 and unproven.
 
 Working from the dyld shared cache extracted from our own root image
 (`research/ios18/dsc`, 4.0 GB, via `tools/renegade/hfsx.py ... dsc`), image
@@ -37,7 +39,7 @@ symbol-resolving dcache.py is very slow for large windows; prefer raw dumps.
 | apple80211_channels | 4824B | — | **4824B (very likely)** | adjacent length-validation pair `0x12D8` at 0x2103f027c/0x2103f0288; confirm by disassembly context |
 | apple80211_channels_info | 10016B | — | **10016B (very likely)** | same pattern `0x2720` at 0x2103f0808/0x2103f0814 |
 | apple80211_assoc | 592B, key@0x48 | — | **unknown — changed** | 0x250 immediate absent from the whole image; derive from the ASSOCIATE(20) path |
-| apple80211_scan_request | 5456B, channels@0x48,flags@0x1308,names@0x1318 | — | **unknown — changed** | 0x1550 absent; derive from SCAN_REQ path |
+| apple80211_scan_request | 5456B, channels@0x48,flags@0x1308,names@0x1318 | — | **5528B (0x1598), all 16.5 field offsets unchanged** | resolved 2026-11-13: live wifid sent 5528 B; builder IO80211 0x210401f08 (sizes 0x1598 at 0x210401cf8/0x210409a14) stores version/bss_type/bssid/ssid_length@0x10/ssid@0x14/scan_type@0x34/phy_mode@0x38/rest_ms@0x40/channels@0x48 (max 400)/flags@0x1308/unused_2@0x1310/name_count@0x1314/names@0x1318 stride 0x38/short_ssid@0x1548; the tail after short_ssid grew 4→76 B (scan UUID string at 0x154c via uuid_unparse, u64 option at 0x1590); kernel widened the tail, reads none of it |
 | apple80211_scan_result | 1164B, ssid_length@0x60,age_ms@0x84,elements@0x8c | — | **unknown — changed** | 0x48C absent; derive from SCAN_RESULT(11) path |
 
 ## Landmarks found (unslid cache addresses)
