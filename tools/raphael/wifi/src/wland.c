@@ -752,11 +752,31 @@ static int net(unsigned secs)
 	servreg_ready();
 	read_conf();
 	uint64_t end = link_ms() + (uint64_t)secs * 1000, stats = link_ms() + 30000;
+	static uint64_t down_at;
 	while (!secs || link_ms() < end) {
 		link_poll(100);
 		if (link_ms() > stats) {
 			radio_stats();
 			stats = link_ms() + 30000;
+		}
+		/* after a beacon miss the firmware's event pipeline can die entirely
+		 * (it reads our CE descriptors but answers nothing): when the radio
+		 * has stayed down for a minute, restart the WLAN firmware PD */
+		if (!radio_joined() && !getenv("WLAND_NO_RADIO")) {
+			if (!down_at) {
+				down_at = link_ms();
+			} else if (link_ms() - down_at > 60000) {
+				unsigned mode = 1;
+				char *m = getenv("WLAND_SHUTDOWN_MODE");
+				if (m)
+					mode = (unsigned)atoi(m);
+				wland_console("wland: radio recovery: restarting the WLAN firmware\n");
+				radio_reset();
+				wlfw_shutdown(mode);
+				down_at = link_ms();
+			}
+		} else {
+			down_at = 0;
 		}
 		if (!wlfw_pending())
 			continue;

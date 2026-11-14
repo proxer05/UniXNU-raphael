@@ -278,8 +278,11 @@ void bridge_poll(void)
 		case FW_SCAN:
 			if (scan_pending)
 				break;			/* the scan under way answers it */
-			if (radio_joined() && link_ms() - last_bg_scan < 15000) {
-				bridge_list(0);		/* joined: a background scan at most every 15 s; what is known */
+			if (radio_joined()) {
+				/* joined: always serve what we know. A real sweep takes the radio
+				 * off the home channel and the firmware's beacon watchdog drops the
+				 * link within seconds (seen on every background scan). */
+				bridge_list(0);
 				break;
 			}
 			scan_pending = 1;

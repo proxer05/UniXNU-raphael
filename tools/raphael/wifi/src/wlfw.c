@@ -226,6 +226,28 @@ static int wlan_enable(void)
 	return 0;
 }
 
+/*
+ * WLAN_MODE with a different mode value puts the WLAN PD down: the WLFW
+ * service disappears from qrtr and the modem re-announces it when the PD is
+ * back (net() then re-runs wlfw_start on the new server). Which value means
+ * "off" is untested on this firmware - try WLAND_SHUTDOWN_MODE (default 1;
+ * our enable uses 0 and boots mission mode).
+ */
+int wlfw_shutdown(unsigned mode)
+{
+	struct qmi_buf q;
+	struct qmi_msg r;
+	fw_ready = 0;
+	msa_ready = 0;
+	started = 0;
+	qmi_start(&q, QMI_REQUEST, 0, WLAN_MODE);
+	qmi_tlv_u32(&q, 0x01, mode);
+	int rc = request(&q, &r, 3000);
+	printf("wlfw: shutdown (mode %u) -> %d; waiting for the service to re-announce\n", mode, rc);
+	srv_up = 0;
+	return rc;
+}
+
 int wlfw_start(void)
 {
 	struct qmi_buf q;

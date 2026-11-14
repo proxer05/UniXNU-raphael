@@ -37,6 +37,8 @@ int rdma_iova_to_pa(uint64_t iova, uint64_t *cpu_pa);
 int rdma_iova_owned(uint64_t iova, uint64_t size);
 
 uint64_t rdma_size(void);
+void rdma_mark(void);		/* remember the bump position (call before the radio allocates) */
+void rdma_reset(void);		/* drop the radio's allocations (the rmtfs buffer below the mark stays) */
 uint64_t rdma_used(void);
 
 #endif

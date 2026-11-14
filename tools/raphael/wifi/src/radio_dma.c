@@ -101,5 +101,11 @@ rdma_iova_owned(uint64_t iova, uint64_t size)
 uint64_t
 rdma_size(void) { return ar_size; }
 
+/* the radio's allocations live above the mark (rmtfs's buffer below it); a
+ * firmware restart drops the old ones and re-allocates the same region */
+static uint64_t ar_mark;
+void rdma_mark(void) { ar_mark = ar_next; }
+void rdma_reset(void) { if (ar_mark && ar_mark <= ar_size) ar_next = ar_mark; }
+
 uint64_t
 rdma_used(void) { return ar_next; }

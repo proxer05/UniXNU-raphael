@@ -2140,9 +2140,51 @@ static void wmi_rx(const uint8_t *d, uint32_t len)
 
 static uint64_t start_ms;
 
+/*
+ * The firmware's WMI/event pipeline dies after a beacon miss and never
+ * answers again (the CE read index advances, nothing is processed). Only a
+ * WLAN PD restart brings it back: forget everything, drop the radio's arena
+ * allocations (rmtfs's buffer below the mark stays), and let net() re-run
+ * wlfw_start + radio_start on the re-announced WLFW service.
+ */
+void radio_reset(void)
+{
+	w_teardown();
+	ce_up = 0;
+	htc_ready = htc_setup = 0;
+	wmi_eid = htt_eid = 0xff;
+	memset(ep, 0, sizeof(ep));
+	wmi_init_sent = wmi_ready = wmi_seen_bmap = wmi_seen_reqs = 0;
+	htt_state = htt_alloc = htt_msgs = htt_msdus = 0;
+	htt_ring_pa = htt_ring_dma = htt_idx_pa = htt_idx_dma = 0;
+	htt_bank_pa = htt_bank_dma = htt_buf_pa = htt_buf_dma = 0;
+	tx_pool_pa = tx_pool_dma = tx_busy = 0;
+	s_mgmt_pa = s_mgmt_dma = 0;
+	rri_pa = rri_dma = 0;
+	memset(ce, 0, sizeof(ce));
+	scan_started = scanning = scan_asked = 0;
+	scan_started_ms = next_scan_ms = 0;
+	nbss = scans = scan_frames = 0;
+	s_state = S_IDLE;
+	s_join_asked = 0;
+	s_result = -1;
+	s_msg1s = 0;
+	tx_sent = tx_done = tx_fail = 0;
+	rx_up = 0;
+	rdma_reset();
+	LOG("radio: reset (the firmware stopped answering; the WLFW PD restarts)");
+}
+
 int radio_start(void)
 {
-	if (radio_dma_acquire() || ce_start())
+	static int marked;
+	if (radio_dma_acquire())
+		return -1;
+	if (!marked) {
+		rdma_mark();	/* rmtfs's buffer sits below this; radio restarts reuse the region */
+		marked = 1;
+	}
+	if (ce_start())
 		return -1;
 	start_ms = link_ms();
 	return 0;

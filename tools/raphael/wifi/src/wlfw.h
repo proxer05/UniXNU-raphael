@@ -11,5 +11,6 @@ extern struct wlfw_info wlfw;
 void wlfw_new_server(uint32_t node, uint32_t port);
 int wlfw_pending(void);		/* the server is up, not started yet */
 int wlfw_start(void);
+int wlfw_shutdown(unsigned mode);	/* WLAN_MODE(MODE): the WLAN PD goes down and the WLFW service re-announces */
 void wlfw_handle(const struct qrtr_hdr *h, const uint8_t *d, uint32_t n);
 #endif
