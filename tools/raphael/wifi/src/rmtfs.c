@@ -373,6 +373,17 @@ int rmtfs_prepare(void)
 	return 0;
 }
 
+/* after a modem restart the modem's mapping of the buffer is gone; the same
+ * owners get it back (as wlfw.c says of the MSA region) */
+void rmtfs_reassign(void)
+{
+	if (!buf_pa)
+		return;
+	static const uint32_t src[] = { VMID_HLOS }, dst[] = { VMID_HLOS, VMID_MSS_MSA };
+	if (hyp_assign(buf_pa, BUF_TOTAL_SIZE, src, 1, dst, 2) == 0)
+		printf("rmtfs: buffer re-assigned to the modem after its restart\n");
+}
+
 static int caller_window(uint32_t caller, uint64_t *out_base, uint32_t *out_max)
 {
 	if (caller < 1 || caller > NPARTS || !buf_pa)

@@ -260,6 +260,10 @@ int link_poll(unsigned ms)
 int link_up(qrtr_cb_t cb, unsigned timeout_ms)
 {
 	qrtr_cb = cb;
+	rcid = 0;
+	open_tx = open_acked = opened_by_remote = version_done = 0;
+	nrintent = 0;
+	rxoff = 0;
 	if (glink_init())
 		return -1;
 	glink_send(GLINK_CMD_VERSION, 1, FEAT_INTENT_REUSE, NULL, 0);

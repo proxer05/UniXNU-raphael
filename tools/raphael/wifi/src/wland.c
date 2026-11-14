@@ -152,6 +152,22 @@ static int wlan_power(void)
 	return qmp_send("{class: clock, res: qdss, val: 1}") ? -1 : 0;
 }
 
+static int wlan_power_off(void)
+{
+	static const struct { const char *res; uint32_t mv; } ldo[] = {
+		{ "ldoa1", 752 }, { "ldoa7", 1800 }, { "ldoc2", 1304 }, { "ldoc11", 3104 },
+	};
+	for (unsigned i = 0; i < sizeof(ldo) / sizeof(ldo[0]); i++) {
+		uint32_t off[3] = { 0, 8, 4 }, val[3] = { ldo[i].mv, 7, 0 };	/* voltage kept, enable off */
+		int rc = pm_rpmh(ldo[i].res, 3, off, val);
+		printf("wlan power: %s off -> %d\n", ldo[i].res, rc);
+	}
+	uint32_t off[1] = { 4 }, val[1] = { 0 };
+	int rc = pm_rpmh("rfclka2", 1, off, val);
+	printf("wlan power: rfclka2 off -> %d\n", rc);
+	return qmp_send("{class: clock, res: qdss, val: 0}") ? -1 : 0;
+}
+
 /* SMP2P item: magic "$SMP", version/features, local/remote pid, total/valid entries, flags, entries[16+4] */
 static void smp2p_show(const char *what, unsigned item)
 {
@@ -753,30 +769,65 @@ static int net(unsigned secs)
 	read_conf();
 	uint64_t end = link_ms() + (uint64_t)secs * 1000, stats = link_ms() + 30000;
 	static uint64_t down_at;
+	static int restart_stage;
 	while (!secs || link_ms() < end) {
 		link_poll(100);
 		if (link_ms() > stats) {
 			radio_stats();
 			stats = link_ms() + 30000;
 		}
-		/* after a beacon miss the firmware's event pipeline can die entirely
-		 * (it reads our CE descriptors but answers nothing): when the radio
-		 * has stayed down for a minute, restart the WLAN firmware PD */
-		if (!radio_joined() && !getenv("WLAND_NO_RADIO")) {
-			if (!down_at) {
-				down_at = link_ms();
-			} else if (link_ms() - down_at > 60000) {
-				unsigned mode = 1;
-				char *m = getenv("WLAND_SHUTDOWN_MODE");
-				if (m)
-					mode = (unsigned)atoi(m);
-				wland_console("wland: radio recovery: restarting the WLAN firmware\n");
+		/* After a beacon miss the firmware's event pipeline can die entirely: it
+		 * keeps reading our CE descriptors but answers nothing (no scan-dones,
+		 * no auth replies, rx frozen), and the WLAN PD never reports a crash.
+		 * Recovery ladder, one stage per 30 s of down time:
+		 *   0: WLAN_MODE(4) puts the wedged PD down (ath11k: FIRMWARE_MODE_OFF),
+		 *   1: power-cycle the WCN3990 (a PD restart does not reset its copy
+		 *      engines - the rails do, which is what a cold boot gets), then the
+		 *      full wlfw_start boots the firmware again,
+		 *   2: if the firmware still does not come back, the whole modem gets a
+		 *      PAS shutdown + re-boot (the GLINK ring re-init and the rmtfs
+		 *      buffer re-assign were built for that).
+		 * The countdown starts only once a join was attempted: the boot-time
+		 * scans take a while and a healthy boot must not be killed mid-join. */
+		if (!radio_join_attempted() || radio_joined()) {
+			down_at = link_ms();
+			restart_stage = 0;
+		} else if (!getenv("WLAND_NO_RADIO") && link_ms() - down_at > 30000) {
+			if (restart_stage == 0) {
+				wland_console("wland: radio recovery: WLAN_MODE(4), the WLAN PD goes down\n");
 				radio_reset();
-				wlfw_shutdown(mode);
+				wlfw_server_gone();
+				wlfw_shutdown(4);
+				restart_stage = 1;
+				down_at = link_ms();
+			} else if (restart_stage == 1) {
+				wland_console("wland: radio recovery: power-cycling the WLAN chip\n");
+				radio_reset();
+				wlan_power_off();
+				delay_ms(150);
+				if (wlan_power())
+					printf("net: the WLAN rails failed to come back\n");
+				delay_ms(100);
+				wlfw_server_back();	/* the WLFW QMI on the modem never left */
+				restart_stage = 2;	/* wlfw_pending re-runs wlfw_start; the modem restarts if it fails */
+				down_at = link_ms();
+			} else if (restart_stage == 2 && !wlfw_pending()) {
+				wland_console("wland: radio recovery: the WLAN firmware did not come back, restarting the modem\n");
+				radio_reset();
+				wlfw_server_gone();
+				uint64_t r1 = 0;
+				int64_t rc = scm(6, 1, PAS_MODEM, 0, 0, &r1);	/* PAS_SHUTDOWN */
+				printf("net: modem shutdown -> %lld/%llx\n", (long long)rc, (unsigned long long)r1);
+				if (boot_modem())
+					printf("net: modem re-boot failed\n");
+				glink_init();
+				rmtfs_reassign();
+				printf("net: modem restarted, services resume\n");
+				restart_stage = 0;
+				down_at = link_ms();
+			} else {
 				down_at = link_ms();
 			}
-		} else {
-			down_at = 0;
 		}
 		if (!wlfw_pending())
 			continue;

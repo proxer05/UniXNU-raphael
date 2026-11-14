@@ -57,6 +57,24 @@ void wlfw_new_server(uint32_t node, uint32_t port)
 	printf("wlfw: server at %u:%x\n", node, port);
 }
 
+void wlfw_server_gone(void)
+{
+	srv_up = 0;
+	started = 0;
+	fw_ready = 0;
+	msa_ready = 0;
+}
+
+int wlfw_started(void)
+{
+	return started;
+}
+
+void wlfw_server_back(void)
+{
+	srv_up = 1;			/* the WLFW QMI on the modem survives the PD shutdown */
+}
+
 int wlfw_pending(void)
 {
 	return srv_up && !started;
@@ -243,8 +261,9 @@ int wlfw_shutdown(unsigned mode)
 	qmi_start(&q, QMI_REQUEST, 0, WLAN_MODE);
 	qmi_tlv_u32(&q, 0x01, mode);
 	int rc = request(&q, &r, 3000);
-	printf("wlfw: shutdown (mode %u) -> %d; waiting for the service to re-announce\n", mode, rc);
-	srv_up = 0;
+	printf("wlfw: shutdown (mode %u) -> %d\n", mode, rc);
+	/* the QMI layer lives on the modem and survives the PD going down; the
+	 * re-enable is another wlfw_start (WLAN_CFG + WLAN_MODE boots the PD) */
 	return rc;
 }
 

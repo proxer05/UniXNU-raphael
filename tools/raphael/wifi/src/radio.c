@@ -1211,11 +1211,14 @@ static void htt_start(void)
 static void sta_rx_native(const uint8_t *f, uint32_t len);
 static void htt_tx_compl(const uint8_t *p, uint32_t len);
 
+static uint64_t last_rx_ms;
+
 static void htt_rx(const uint8_t *p, uint32_t len)
 {
 	static uint8_t frame[HTT_BUF_SIZE];
 	uint8_t type = len ? p[0] : 0xff;
 	htt_msgs++;
+	last_rx_ms = link_ms();
 	if (type == T2H_TX_COMPL_IND && len >= 4) {
 		htt_tx_compl(p, len);
 		return;
@@ -2044,9 +2047,17 @@ static void sta_poll(void)
  * Join SSID with a passphrase (8-63 characters), 64 hex digits (the PMK itself) or "" (open).
  * Starts once the radio has scanned; radio_link_hook says when the link is up.
  */
+static int join_attempted;
+
+int radio_join_attempted(void)
+{
+	return join_attempted;
+}
+
 int radio_join(const char *ssid, const char *pass)
 {
 	static int tested, crypto_ok;
+	join_attempted = 1;
 	size_t sl = strlen(ssid), pl = strlen(pass);
 	if (!sl || sl > 32)
 		return EINVAL;
@@ -2229,6 +2240,19 @@ void radio_poll(void)
 		 * the join path: scanning gates w_teardown/w_join_begin */
 		LOG("scan: no done event in 30 s, giving up on it");
 		scanning = 0;
+	}
+	/* a healthy link always carries broadcasts: total silence while joined means
+	 * the firmware stalled again (this time without a roam event - the vdev stays
+	 * "up" and the tx pool silently fills). Recover the same way. */
+	if (s_state == S_UP && last_rx_ms && now - last_rx_ms > 40000) {
+		uint32_t rri[CE_COUNT];
+		mem_rd(rri_pa, rri, sizeof(rri));
+		LOG("fw stall: nothing received for %llu s (ce2 rri %08x, DRRI %u, DR_WR %u, htt idx %u)"
+		    " - resetting and restarting the WLAN firmware",
+		    (unsigned long long)((now - last_rx_ms) / 1000), rri[2], ce_rd(2, CUR_DRRI),
+		    ce_rd(2, DR_WR_IDX), htt_alloc);
+		w_link_lost("fw stall");
+		radio_reset();
 	}
 	sta_poll();
 }

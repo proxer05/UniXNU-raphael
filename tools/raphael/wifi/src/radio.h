@@ -18,6 +18,7 @@ void radio_rescan(unsigned ms);	/* another passive scan in MS (while idle: not j
 extern const uint8_t radio_mac[6];
 
 /* station: join SSID (passphrase, 64 hex digits = PMK, or "" for open); after the first scan */
+int radio_join_attempted(void);	/* at least one join was asked: the recovery countdown may run */
 int radio_join(const char *ssid, const char *pass);
 int radio_join_result(void);	/* -1 while it runs, 0 joined, ENOTCONN joined then lost, else an errno */
 void radio_disconnect(void);	/* drop a joined link (tests the rejoin) */

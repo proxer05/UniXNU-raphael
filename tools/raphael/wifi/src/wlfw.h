@@ -9,6 +9,9 @@ struct wlfw_info {
 };
 extern struct wlfw_info wlfw;
 void wlfw_new_server(uint32_t node, uint32_t port);
+void wlfw_server_gone(void);
+int wlfw_started(void);
+void wlfw_server_back(void);	/* the QMI service never left during a PD shutdown */	/* the WLFW service left (a wedged PD answers nothing) */
 int wlfw_pending(void);		/* the server is up, not started yet */
 int wlfw_start(void);
 int wlfw_shutdown(unsigned mode);	/* WLAN_MODE(MODE): the WLAN PD goes down and the WLFW service re-announces */
